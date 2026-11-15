@@ -1,0 +1,6 @@
+{
+  "name": "Mourya Tiles",
+  "description": "Tiles and Marbles Billing, Stock, Returns, Attendance & Management App",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
