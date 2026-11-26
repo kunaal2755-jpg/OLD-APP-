@@ -1,185 +1,262 @@
 <!DOCTYPE html>
-<html lang="hi">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mourya Tiles ERP & Admin - Official Download Portal</title>
-    <style>
-        * { box-sizing: border-box; }
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-            background: linear-gradient(135deg, #090d16 0%, #0f172a 100%); 
-            color: #f8fafc; 
-            margin: 0; 
-            padding: 20px 16px; 
-            display: flex; 
-            flex-direction: column; 
-            align-items: center; 
-            min-height: 100vh; 
-        }
-        .header {
-            text-align: center;
-            max-width: 600px;
-            margin-top: 10px;
-            margin-bottom: 24px;
-        }
-        .header h1 { 
-            color: #38bdf8; 
-            font-size: 26px; 
-            font-weight: 800;
-            margin: 0 0 8px 0; 
-            letter-spacing: -0.5px;
-        }
-        .header p { 
-            color: #94a3b8; 
-            font-size: 14px; 
-            margin: 0;
-            line-height: 1.5;
-        }
-        .container { 
-            max-width: 540px; 
-            width: 100%; 
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-        .card { 
-            background: #1e293b; 
-            border-radius: 18px; 
-            padding: 22px; 
-            box-shadow: 0 20px 30px -10px rgba(0,0,0,0.6); 
-            border: 1px solid #334155; 
-            position: relative;
-            overflow: hidden;
-        }
-        .card-user { border-left: 6px solid #38bdf8; }
-        .card-admin { border-left: 6px solid #a855f7; }
-        .badge { 
-            font-size: 11px; 
-            padding: 4px 10px; 
-            border-radius: 9999px; 
-            font-weight: 700; 
-            display: inline-block;
-            margin-bottom: 8px;
-        }
-        .badge-user { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
-        .badge-admin { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
-        .app-title { 
-            font-size: 20px; 
-            font-weight: 800; 
-            margin-bottom: 8px; 
-            display: flex; 
-            align-items: center; 
-            justify-content: space-between; 
-        }
-        .desc { 
-            font-size: 13.5px; 
-            color: #cbd5e1; 
-            margin-bottom: 18px; 
-            line-height: 1.55; 
-        }
-        .btn { 
-            display: flex; 
-            align-items: center; 
-            justify-content: center; 
-            gap: 10px;
-            background: #0284c7; 
-            color: white; 
-            text-decoration: none; 
-            padding: 14px 20px; 
-            border-radius: 12px; 
-            font-weight: 700; 
-            font-size: 16px; 
-            box-shadow: 0 4px 14px rgba(2, 132, 199, 0.4);
-            transition: all 0.2s ease;
-        }
-        .btn:hover { background: #0369a1; transform: translateY(-1px); }
-        .btn-admin { 
-            background: #7e22ce; 
-            box-shadow: 0 4px 14px rgba(126, 34, 206, 0.4);
-        }
-        .btn-admin:hover { background: #6b21a8; }
-        .size-info {
-            font-size: 11.5px;
-            color: #64748b;
-            text-align: center;
-            margin-top: 8px;
-        }
-        .features { 
-            background: rgba(30, 41, 59, 0.7);
-            border-radius: 14px;
-            padding: 18px;
-            border: 1px dashed #334155;
-            font-size: 13px; 
-            color: #94a3b8; 
-            line-height: 1.7; 
-        }
-        .features b { color: #f1f5f9; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mourya Tiles Marbles - Download APK</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    body {
+      background-color: #0B192C;
+      color: #F8FAFC;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 24px;
+      text-align: left;
+      width: 100%;
+      max-width: 480px;
+    }
+    .logo-badge {
+      width: 52px;
+      height: 52px;
+      background: #EAB308;
+      color: #0B192C;
+      font-size: 28px;
+      font-weight: 900;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(234, 179, 8, 0.4);
+      flex-shrink: 0;
+    }
+    .header-text h1 {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      color: #FFFFFF;
+    }
+    .header-text p {
+      font-size: 13px;
+      font-weight: 700;
+      color: #F59E0B;
+      letter-spacing: 0.5px;
+    }
+    .card {
+      background: #112338;
+      border: 1px solid #1E3A5F;
+      border-radius: 20px;
+      padding: 24px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    .active-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #10B981;
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      background: #10B981;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #10B981;
+    }
+    .card h2 {
+      font-size: 22px;
+      font-weight: 800;
+      margin-bottom: 4px;
+      color: #FFFFFF;
+    }
+    .card .subtitle {
+      font-size: 14px;
+      font-weight: 700;
+      color: #F59E0B;
+      margin-bottom: 12px;
+    }
+    .card p.desc {
+      font-size: 13px;
+      color: #CBD5E1;
+      line-height: 1.5;
+      margin-bottom: 24px;
+    }
+    .btn-download {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: #EAB308;
+      color: #0B192C;
+      font-size: 16px;
+      font-weight: 800;
+      text-decoration: none;
+      padding: 16px 28px;
+      border-radius: 14px;
+      width: 100%;
+      box-shadow: 0 6px 20px rgba(234, 179, 8, 0.4);
+      transition: all 0.2s ease;
+    }
+    .btn-download:hover {
+      background: #FACC15;
+      transform: translateY(-2px);
+    }
+    .meta-info {
+      font-size: 12px;
+      color: #94A3B8;
+      margin-top: 10px;
+    }
+    .features-list {
+      background: #FFFFFF;
+      color: #0F172A;
+      border-radius: 18px;
+      padding: 20px;
+      width: 100%;
+      max-width: 480px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+    .features-list h3 {
+      font-size: 15px;
+      font-weight: 800;
+      margin-bottom: 14px;
+      color: #0B192C;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .feature-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      line-height: 1.4;
+      color: #334155;
+    }
+    .feature-icon {
+      font-size: 16px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .install-steps {
+      background: #112338;
+      border: 1px solid #1E3A5F;
+      border-radius: 16px;
+      padding: 18px;
+      width: 100%;
+      max-width: 480px;
+      font-size: 12px;
+      color: #CBD5E1;
+      line-height: 1.6;
+    }
+    .install-steps h4 {
+      color: #F59E0B;
+      font-size: 13px;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+    .install-steps ol {
+      margin-left: 20px;
+    }
+    .footer {
+      margin-top: 24px;
+      font-size: 11px;
+      color: #64748B;
+      text-align: center;
+    }
+  </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🏢 Mourya Tiles & Marbles</h1>
-        <p>आधिकारिक एपीके डाउनलोड पोर्टल — 100% परमानेंट नॉन-एक्सपायरिंग लिंक्स</p>
+
+  <div class="header">
+    <div class="logo-badge">M</div>
+    <div class="header-text">
+      <h1>MOURYA TILES MARBLES</h1>
+      <p>BRIJ DHARAM KANTA</p>
     </div>
+  </div>
 
-    <div class="container">
-        <!-- USER APP -->
-        <div class="card card-user">
-            <span class="badge badge-user">v3.0 Verified Original Base • 23.85 MB</span>
-            <div class="app-title">
-                <span style="color: #38bdf8;">📱 User App (मुख्य दुकान ऐप)</span>
-            </div>
-            <div class="desc">
-                • 🏗️ <b>ओरिजिनल वर्किंग ऐप बेस:</b> आपके 24.13 MB के मूल वर्किंग ऐप के 100% रिसोर्सेज, डिजाइन, लेआउट और कोडबेस पर आधारित।<br>
-                • 🔍 <b>Pinch-to-Zoom & Pan Photo Viewer:</b> टाइल की फोटो पर क्लिक करने पर फुलस्क्रीन खुलती है जिसमें 2 अंगुलियों से ज़ूम (Pinch-to-Zoom) और ड्रैग (Pan) कर सकते हैं!<br>
-                • 📐 <b>PDF Custom Image Size:</b> कैटलॉग PDF बनाते समय टाइल फोटो की ऊंचाई और चौड़ाई 50% से 200% स्लाइडर से सेट करें।<br>
-                • 💾 <b>Complete Base64 Image Backup:</b> बैकअप में टाइल्स की फोटो Base64 रूप में साथ में सेव होती हैं, रीस्टोर पर फोटो अपने आप लोड होंगी।<br>
-                • 📁 <b>Custom Mobile Folder:</b> Documents/Downloads और अपना मनपसंद फोन फोल्डर चुनें।<br>
-                • 📧 <b>Automatic Scheduled Backup:</b> प्रतिदिन शाम के तय समय (20:00 आदि) पर Google Drive/Email व फोन में स्वतः बैकअप।<br>
-                • ↩️ <b>पूर्ववत सुविधाएं:</b> टाइल्स रिटर्न, मैनुअल आइटम्स, 12x18 रेट, स्टाफ हाजिरी पूरी तरह सुरक्षित।
-            </div>
-            <div style="display: flex; flex-direction: column; gap: 10px;">
-                <a href="https://gofile.io/d/nF0MoXvI" target="_blank" class="btn">
-                    <span>⬇️ Download User App v3.0 (23.85 MB) [Direct 1-Click]</span>
-                </a>
-                <a href="/TILES_AND_MARBLES_User_App.apk" download="TILES_AND_MARBLES_User_App.apk" class="btn" style="background: #334155; font-size: 14px; padding: 10px 16px;">
-                    <span>📥 Direct APK Download [Mirror 2]</span>
-                </a>
-            </div>
-            <div class="size-info">Package: com.aistudio.mouryatiles.vmqzk • Build 40 (Version 3.0) • 23,848,271 Bytes</div>
-        </div>
-
-        <!-- ADMIN APP -->
-        <div class="card card-admin">
-            <span class="badge badge-admin">v3.0 Verified Original Base • 23.70 MB</span>
-            <div class="app-title">
-                <span style="color: #c084fc;">🛡️ Admin App (मालिक कंट्रोल ऐप)</span>
-            </div>
-            <div class="desc">
-                • 🏗️ <b>ओरिजिनल वर्किंग ऐप बेस:</b> आपके मूल वर्किंग ऐप के पूर्ण कोडबेस और रिसोर्सेज पर आधारित।<br>
-                • 📱 <b>दोनों ऐप एक साथ इंस्टॉल होंगे:</b> इसका अलग पैकेज आईडी (com.aistudio.mouryatiles.admin) कर दिया गया है जिससे "App Not Installed" की समस्या 100% खत्म हो गई।<br>
-                • ⚡ <b>Live Instant Block:</b> एक क्लिक में यूजर को तुरंत ब्लॉक करें, यूजर ऐप तुरंत लॉक।<br>
-                • ✏️ <b>Account Updates:</b> यूजर आईडी, पासवर्ड, फोन, दुकान का नाम बदलते ही तुरंत सिंक।<br>
-                • ⏳ <b>Validity Extension:</b> 30 दिन या 365 दिन की वैधता सीधे बढ़ाएं।<br>
-                • 👥 <b>Master Staff & Live Data:</b> सभी कनेक्टेड शॉप्स का लाइव डेटा और स्टेटस।
-            </div>
-            <div style="display: flex; flex-direction: column; gap: 10px;">
-                <a href="https://gofile.io/d/JJWUEH9T" target="_blank" class="btn btn-admin">
-                    <span>⬇️ Download Admin App v3.0 (23.70 MB) [Direct 1-Click]</span>
-                </a>
-                <a href="/TILES_AND_MARBLES_Admin_App.apk" download="TILES_AND_MARBLES_Admin_App.apk" class="btn" style="background: #334155; font-size: 14px; padding: 10px 16px;">
-                    <span>📥 Direct APK Download [Mirror 2]</span>
-                </a>
-            </div>
-            <div class="size-info">Package: com.aistudio.mouryatiles.admin • Build 40 • 23,696,719 Bytes</div>
-            <div class="size-info">Package: com.example.tilesadmin • Owner Control Edition</div>
-        </div>
-
-        <!-- GUARANTEE INFO -->
-        <div class="features">
-            🔒 <b>परमानेंट डाउनलोड गारंटी:</b> यह पोर्टल और ऊपर दिए गए दोनों लिंक्स हमेशा के लिए लाइव हैं। डाउनलोड करने के बाद फोन में APK पर क्लिक करके 'Update' / 'Install' करें।
-        </div>
+  <div class="card">
+    <div class="active-badge">
+      <div class="dot"></div>
+      OFFLINE BUSINESS MANAGEMENT ACTIVE
     </div>
+    <h2>MOURYA TILES MARBLES</h2>
+    <div class="subtitle">BRIJ DHARAM KANTA</div>
+    <p class="desc">
+      Manage inventory, multi-tile orders, quantity challans, stock balances, customer directory, and generate professional PDF invoices offline.
+    </p>
+
+    <!-- Direct Download Button -->
+    <a href="/mourya-tiles-marbles.apk" download="mourya-tiles-marbles.apk" class="btn-download">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="7 10 12 15 17 10"></polyline>
+        <line x1="12" y1="15" x2="12" y2="3"></line>
+      </svg>
+      Download APK (v1.0)
+    </a>
+    <div class="meta-info">File Size: ~23 MB • Architecture: Universal Android (API 24+)</div>
+  </div>
+
+  <div class="features-list">
+    <h3>Built-In Business Features</h3>
+    <div class="feature-item">
+      <span class="feature-icon">📦</span>
+      <div><strong>Accurate Tile Stock Management:</strong> Independent pieces-per-box configuration for every tile product. Base piece accounting displayed in full boxes and loose pieces.</div>
+    </div>
+    <div class="feature-item">
+      <span class="feature-icon">💰</span>
+      <div><strong>Smart Size-Based Pricing:</strong> Default pricing based on dimensions (12×18, 2×4, 2×2, 16×16) with individual customer override flexibility.</div>
+    </div>
+    <div class="feature-item">
+      <span class="feature-icon">📄</span>
+      <div><strong>Customer PDF Bills with Photos:</strong> Generate offline PDF invoices with tile photos. Per-order Price ON/OFF visibility toggle (never displays internal total pieces).</div>
+    </div>
+    <div class="feature-item">
+      <span class="feature-icon">💬</span>
+      <div><strong>WhatsApp & System Sharing:</strong> Share formatted bill messages with attached PDFs and validated Indian mobile numbers.</div>
+    </div>
+    <div class="feature-item">
+      <span class="feature-icon">🔒</span>
+      <div><strong>100% Offline Database:</strong> Uses local Room SQLite database with full JSON backup & restore. No servers or internet needed.</div>
+    </div>
+  </div>
+
+  <div class="install-steps">
+    <h4>Android Installation Steps:</h4>
+    <ol>
+      <li>Tap <strong>Download APK (v1.0)</strong> above.</li>
+      <li>Once downloaded, open <strong>mourya-tiles-marbles.apk</strong> from your downloads notification or file manager.</li>
+      <li>Tap <strong>Install</strong>. If prompted, allow <em>"Install from this source"</em>.</li>
+      <li>Open the app and manage your tile business with complete offline peace of mind.</li>
+    </ol>
+  </div>
+
+  <div class="footer">
+    MOURYA TILES MARBLES • BRIJ DHARAM KANTA • Android Offline Application
+  </div>
+
 </body>
 </html>

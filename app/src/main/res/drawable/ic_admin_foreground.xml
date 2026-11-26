@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer Security Shield -->
+    <path
+        android:pathData="M 54,26 C 68,26 76,30 76,30 C 76,54 64,72 54,82 C 44,72 32,54 32,30 C 32,30 40,26 54,26 Z"
+        android:fillColor="#E0A922" />
+
+    <!-- Inner Shield Inset -->
+    <path
+        android:pathData="M 54,30 C 65,30 72,33 72,33 C 72,52 62,68 54,76 C 46,68 36,52 36,33 C 36,33 43,30 54,30 Z"
+        android:fillColor="#0D1B2A" />
+
+    <!-- Golden Crown Top -->
+    <path
+        android:pathData="M 44,40 L 48,46 L 54,38 L 60,46 L 64,40 L 63,52 L 45,52 Z"
+        android:fillColor="#FBBF24" />
+
+    <!-- Key & Lock Core Symbol -->
+    <path
+        android:pathData="M 54,54 C 51.2,54 49,56.2 49,59 C 49,60.8 50,62.4 51.5,63.2 L 51,70 L 57,70 L 56.5,63.2 C 58,62.4 59,60.8 59,59 C 59,56.2 56.8,54 54,54 Z"
+        android:fillColor="#FBBF24" />
+
+    <!-- Keyhole Center -->
+    <path
+        android:pathData="M 54,57 A 2,2 0 1,0 54,61 A 2,2 0 1,0 54,57 Z"
+        android:fillColor="#0D1B2A" />
+
+    <!-- Star Jewels on Crown -->
+    <path
+        android:pathData="M 54,34 A 1.8,1.8 0 1,0 54,37.6 A 1.8,1.8 0 1,0 54,34 Z"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M 43,36 A 1.5,1.5 0 1,0 43,39 A 1.5,1.5 0 1,0 43,36 Z"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M 65,36 A 1.5,1.5 0 1,0 65,39 A 1.5,1.5 0 1,0 65,36 Z"
+        android:fillColor="#FFFFFF" />
+</vector>

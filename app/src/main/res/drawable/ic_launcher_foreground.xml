@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Tile 1: Top-Left (Polished White Tile) -->
+    <path
+        android:pathData="M 32,32 L 51,32 C 52,32 53,33 53,34 L 53,51 L 32,51 C 31,51 30,50 30,49 L 30,34 C 30,33 31,32 32,32 Z"
+        android:fillColor="#FFFFFF" />
+    <!-- Marble vein on tile 1 -->
+    <path
+        android:pathData="M 33,48 Q 42,40 50,44"
+        android:strokeColor="#CBD5E1"
+        android:strokeWidth="1.2" />
+
+    <!-- Tile 2: Top-Right (Golden / Amber Accent Tile) -->
+    <path
+        android:pathData="M 55,34 C 55,33 56,32 57,32 L 76,32 C 77,32 78,33 78,34 L 78,49 C 78,50 77,51 76,51 L 55,51 Z"
+        android:fillColor="#E0A922" />
+    <path
+        android:pathData="M 58,46 L 75,35"
+        android:strokeColor="#FDE68A"
+        android:strokeWidth="1.2" />
+
+    <!-- Tile 3: Bottom-Left (Cyan / Blue Accent Tile) -->
+    <path
+        android:pathData="M 30,57 L 51,57 C 52,57 53,58 53,59 L 53,76 L 34,76 C 33,76 32,75 32,74 L 30,57 Z"
+        android:fillColor="#2A6F97" />
+    <path
+        android:pathData="M 33,63 L 49,71"
+        android:strokeColor="#89C2D9"
+        android:strokeWidth="1.2" />
+
+    <!-- Tile 4: Bottom-Right (Vitrified White Tile) -->
+    <path
+        android:pathData="M 55,57 L 76,57 C 77,57 78,58 78,59 L 78,74 C 78,75 77,76 76,76 L 57,76 C 56,76 55,75 55,74 Z"
+        android:fillColor="#F8FAFC" />
+    <path
+        android:pathData="M 58,70 Q 66,62 75,67"
+        android:strokeColor="#CBD5E1"
+        android:strokeWidth="1.2" />
+
+    <!-- Center Diamond Highlight (Tile Joint Intersection Accent) -->
+    <path
+        android:pathData="M 54,49 L 58,54 L 54,59 L 50,54 Z"
+        android:fillColor="#F59E0B" />
+
+    <!-- Bold 'M' Monogram in Center representing Mourya -->
+    <path
+        android:pathData="M 40,40 L 44,40 L 54,53 L 64,40 L 68,40 L 68,68 L 62,68 L 62,49 L 54,60 L 46,49 L 46,68 L 40,68 Z"
+        android:fillColor="#0D1B2A" />
+    <path
+        android:pathData="M 42,42 L 44,42 L 54,55 L 64,42 L 66,42 L 66,66 L 64,66 L 64,48 L 54,61 L 44,48 L 44,66 L 42,66 Z"
+        android:fillColor="#E0A922" />
+</vector>
