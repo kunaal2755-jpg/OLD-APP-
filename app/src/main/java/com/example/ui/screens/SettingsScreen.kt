@@ -116,6 +116,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     val settings by viewModel.shopSettings.collectAsStateWithLifecycle()
     val sizePricings by viewModel.sizePricings.collectAsStateWithLifecycle()
+    val products by viewModel.products.collectAsStateWithLifecycle()
 
     var currentUser by remember { mutableStateOf(UserSessionManager.getCurrentUser(context)) }
 
@@ -1133,6 +1134,22 @@ fun SettingsScreen(
                 }
             }
 
+            // 4.5. PDF Tile Size Display Customizer (2X4, 12X18, etc.)
+            item {
+                val allKnownSizes = remember(sizePricings, products) {
+                    (sizePricings.map { it.sizeName } + products.map { it.size }).distinct()
+                }
+                com.example.ui.components.PdfSizeCustomizationSection(
+                    configJson = settings.pdfSizeDisplayConfigJson,
+                    availableSizes = allKnownSizes,
+                    primaryColor = activeTheme.primary,
+                    accentColor = activeTheme.accent,
+                    onSaveConfigJson = { newJson ->
+                        viewModel.savePdfSizeDisplayConfig(newJson)
+                    }
+                )
+            }
+
             // 5. Recycle Bin & Trash (10-Day Auto Purge & 1-Click Restore)
             item {
                 Card(
@@ -1332,7 +1349,7 @@ fun SettingsScreen(
                             color = Navy900
                         )
                         Text(
-                            text = "पूरे व्यापार का डेटा (स्टॉक, बिल, ग्राहक, लेजर) सुरक्षित फ़ाइल में सेव करें",
+                            text = "पूरे व्यापार का डेटा (टाइल फोटो, दुकान लोगो, स्टॉक, बिल, ग्राहक, लेजर व PDF सेटिंग्स) सुरक्षित फ़ाइल में सेव व रीस्टोर करें",
                             fontSize = 11.sp,
                             color = Color(0xFF64748B)
                         )
@@ -1436,7 +1453,7 @@ fun SettingsScreen(
                                     Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF2563EB), modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "फ़ाइल का नाम: dd_MM_yyyy_backup_data.json (उदा. 01_11_2026_backup_data.json)। प्रतिदिन इस तारीख से आगे का आज और बीते सभी दिनों का डेटा संचयी रूप से जुड़ेगा।",
+                                        text = "फ़ाइल का नाम: dd_MM_yyyy_backup_data.json (उदा. 01_11_2026_backup_data.json)। इसमें सभी टाइल फोटो, स्टॉक, बिल और सेटिंग्स संचयी रूप से सुरक्षित रहते हैं।",
                                         fontSize = 10.5.sp,
                                         color = Color(0xFF1E40AF)
                                     )

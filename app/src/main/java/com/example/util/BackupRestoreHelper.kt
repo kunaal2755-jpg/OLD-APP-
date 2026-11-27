@@ -1,6 +1,10 @@
 package com.example.util
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Base64
 import androidx.room.withTransaction
 import com.example.data.local.AppDatabase
 import com.example.data.model.Customer
@@ -14,19 +18,179 @@ import com.example.data.model.StaffPayment
 import com.example.data.model.TileProduct
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.CRC32
 
 object BackupRestoreHelper {
 
-    suspend fun exportDatabaseToJson(database: AppDatabase): String {
+    private class EmbeddedImageCollector(
+        private val context: Context?,
+        private val includeImages: Boolean,
+        private val maxDim: Int,
+        private val jpegQuality: Int
+    ) {
+        private val uriToKey = mutableMapOf<String, String>()
+        val embeddedImagesJson = JSONObject()
+        var count: Int = 0
+            private set
+
+        fun registerImage(uriString: String?): String {
+            if (!includeImages || uriString.isNullOrBlank()) return ""
+            val trimmed = uriString.trim()
+            uriToKey[trimmed]?.let { return it }
+
+            val encoded = encodeImageToBase64(context, trimmed, maxDim, jpegQuality) ?: return ""
+            count++
+            val key = "img_$count"
+            uriToKey[trimmed] = key
+            embeddedImagesJson.put(key, encoded)
+            return key
+        }
+    }
+
+    private fun encodeImageToBase64(
+        context: Context?,
+        uriString: String,
+        maxDim: Int = 800,
+        jpegQuality: Int = 78
+    ): String? {
+        return try {
+            val isDirectPath = uriString.startsWith("/") || uriString.startsWith("file://")
+            val filePath = if (uriString.startsWith("file://")) uriString.removePrefix("file://") else uriString
+
+            val decodedBitmap: Bitmap? = if (isDirectPath && File(filePath).exists()) {
+                val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(filePath, boundsOpts)
+                val origMax = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
+                if (origMax <= 0) return null
+                var sampleSize = 1
+                while (origMax / (sampleSize * 2) >= maxDim) {
+                    sampleSize *= 2
+                }
+                val decodeOpts = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                }
+                BitmapFactory.decodeFile(filePath, decodeOpts)
+            } else if (context != null) {
+                val uri = Uri.parse(uriString)
+                val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, boundsOpts)
+                }
+                val origMax = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
+                if (origMax <= 0) return null
+                var sampleSize = 1
+                while (origMax / (sampleSize * 2) >= maxDim) {
+                    sampleSize *= 2
+                }
+                val decodeOpts = BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                }
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, decodeOpts)
+                }
+            } else {
+                null
+            }
+
+            if (decodedBitmap == null) return null
+
+            val finalBitmap = try {
+                val curMax = maxOf(decodedBitmap.width, decodedBitmap.height)
+                if (curMax > maxDim && curMax > 0) {
+                    val scale = maxDim.toFloat() / curMax.toFloat()
+                    val targetW = (decodedBitmap.width * scale).toInt().coerceAtLeast(1)
+                    val targetH = (decodedBitmap.height * scale).toInt().coerceAtLeast(1)
+                    val scaled = Bitmap.createScaledBitmap(decodedBitmap, targetW, targetH, true)
+                    if (scaled !== decodedBitmap) decodedBitmap.recycle()
+                    scaled
+                } else {
+                    decodedBitmap
+                }
+            } catch (_: Exception) {
+                decodedBitmap
+            }
+
+            val baos = ByteArrayOutputStream()
+            finalBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality.coerceIn(40, 92), baos)
+            finalBitmap.recycle()
+            val bytes = baos.toByteArray()
+            if (bytes.isEmpty()) null else Base64.encodeToString(bytes, Base64.NO_WRAP)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun saveBase64ImageToLocalStorage(context: Context, base64Str: String): String? {
+        return try {
+            if (base64Str.isBlank()) return null
+            val bytes = Base64.decode(base64Str, Base64.DEFAULT)
+            if (bytes.isEmpty()) return null
+
+            val imagesDir = File(context.filesDir, "images")
+            if (!imagesDir.exists()) imagesDir.mkdirs()
+
+            val crc = CRC32().apply { update(bytes) }.value
+            val fileName = "restored_${crc.toString(16)}_${bytes.size}.jpg"
+            val destFile = File(imagesDir, fileName)
+            if (!destFile.exists() || destFile.length() == 0L) {
+                FileOutputStream(destFile).use { fos ->
+                    fos.write(bytes)
+                }
+            }
+            destFile.absolutePath
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractEmbeddedImages(context: Context?, root: JSONObject): Map<String, String> {
+        if (context == null || !root.has("embeddedImages")) return emptyMap()
+        val result = mutableMapOf<String, String>()
+        val obj = root.optJSONObject("embeddedImages") ?: return emptyMap()
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val b64 = obj.optString(key, "")
+            val savedPath = saveBase64ImageToLocalStorage(context, b64)
+            if (!savedPath.isNullOrBlank()) {
+                result[key] = savedPath
+            }
+        }
+        return result
+    }
+
+    private fun isLocalImageAccessible(uriString: String?): Boolean {
+        if (uriString.isNullOrBlank()) return false
+        val path = if (uriString.startsWith("file://")) uriString.removePrefix("file://") else uriString
+        return path.startsWith("/") && File(path).exists() && File(path).length() > 0L
+    }
+
+    suspend fun exportDatabaseToJson(
+        database: AppDatabase,
+        context: Context? = null,
+        includeImages: Boolean = true,
+        maxImageDim: Int = 800,
+        jpegQuality: Int = 78
+    ): String {
         val root = JSONObject()
-        root.put("version", 2)
+        root.put("version", 4)
         root.put("timestamp", System.currentTimeMillis())
+
+        val imageCollector = EmbeddedImageCollector(
+            context = context,
+            includeImages = includeImages,
+            maxDim = maxImageDim,
+            jpegQuality = jpegQuality
+        )
 
         // 1. Settings
         val settings = database.shopSettingsDao().getSettingsSync() ?: ShopSettings()
@@ -38,6 +202,8 @@ object BackupRestoreHelper {
             put("altPhone", settings.altPhone)
             put("address", settings.address)
             put("logoUri", settings.logoUri ?: "")
+            val logoKey = imageCollector.registerImage(settings.logoUri)
+            if (logoKey.isNotEmpty()) put("logoImageKey", logoKey)
             put("gstNumber", settings.gstNumber)
             put("panNumber", settings.panNumber)
             put("bankName", settings.bankName)
@@ -63,6 +229,7 @@ object BackupRestoreHelper {
             put("backupScheduledTime", settings.backupScheduledTime)
             put("backupFromDateString", settings.backupFromDateString)
             put("lastAutoBackupDate", settings.lastAutoBackupDate)
+            put("pdfSizeDisplayConfigJson", settings.pdfSizeDisplayConfigJson)
         }
         root.put("settings", settingsObj)
 
@@ -89,6 +256,8 @@ object BackupRestoreHelper {
                 put("name", prod.name)
                 put("size", prod.size)
                 put("photoUri", prod.photoUri ?: "")
+                val photoKey = imageCollector.registerImage(prod.photoUri)
+                if (photoKey.isNotEmpty()) put("photoImageKey", photoKey)
                 put("description", prod.description)
                 put("piecesPerBox", prod.piecesPerBox)
                 put("stockPieces", prod.stockPieces)
@@ -157,6 +326,8 @@ object BackupRestoreHelper {
                 put("tileSize", item.tileSize)
                 put("piecesPerBox", item.piecesPerBox)
                 put("tilePhotoUri", item.tilePhotoUri ?: "")
+                val itemPhotoKey = imageCollector.registerImage(item.tilePhotoUri)
+                if (itemPhotoKey.isNotEmpty()) put("tilePhotoImageKey", itemPhotoKey)
                 put("fullBoxes", item.fullBoxes)
                 put("loosePieces", item.loosePieces)
                 put("pricePerBox", item.pricePerBox)
@@ -316,7 +487,12 @@ object BackupRestoreHelper {
         }
         root.put("staffMonthlySettlements", setArr)
 
-        return root.toString(2)
+        if (imageCollector.count > 0) {
+            root.put("embeddedImages", imageCollector.embeddedImagesJson)
+            root.put("embeddedImageCount", imageCollector.count)
+        }
+
+        return if (imageCollector.count > 0) root.toString() else root.toString(2)
     }
 
     suspend fun createCumulativeBackupFile(
@@ -325,8 +501,15 @@ object BackupRestoreHelper {
         customFromDateString: String? = null
     ): File {
         val root = JSONObject()
-        root.put("version", 3)
+        root.put("version", 4)
         root.put("timestamp", System.currentTimeMillis())
+
+        val imageCollector = EmbeddedImageCollector(
+            context = context,
+            includeImages = true,
+            maxDim = 800,
+            jpegQuality = 78
+        )
 
         val sdfDate = SimpleDateFormat("dd/MM/yyyy", Locale.ENGLISH)
         val fromMillis: Long = if (!customFromDateString.isNullOrBlank()) {
@@ -349,6 +532,8 @@ object BackupRestoreHelper {
             put("altPhone", settings.altPhone)
             put("address", settings.address)
             put("logoUri", settings.logoUri ?: "")
+            val logoKey = imageCollector.registerImage(settings.logoUri)
+            if (logoKey.isNotEmpty()) put("logoImageKey", logoKey)
             put("gstNumber", settings.gstNumber)
             put("panNumber", settings.panNumber)
             put("bankName", settings.bankName)
@@ -374,6 +559,7 @@ object BackupRestoreHelper {
             put("backupScheduledTime", settings.backupScheduledTime)
             put("backupFromDateString", settings.backupFromDateString)
             put("lastAutoBackupDate", settings.lastAutoBackupDate)
+            put("pdfSizeDisplayConfigJson", settings.pdfSizeDisplayConfigJson)
         }
         root.put("settings", settingsObj)
 
@@ -399,6 +585,8 @@ object BackupRestoreHelper {
                 put("name", prod.name)
                 put("size", prod.size)
                 put("photoUri", prod.photoUri ?: "")
+                val photoKey = imageCollector.registerImage(prod.photoUri)
+                if (photoKey.isNotEmpty()) put("photoImageKey", photoKey)
                 put("description", prod.description)
                 put("piecesPerBox", prod.piecesPerBox)
                 put("stockPieces", prod.stockPieces)
@@ -466,6 +654,8 @@ object BackupRestoreHelper {
                     put("tileSize", item.tileSize)
                     put("piecesPerBox", item.piecesPerBox)
                     put("tilePhotoUri", item.tilePhotoUri ?: "")
+                    val itemPhotoKey = imageCollector.registerImage(item.tilePhotoUri)
+                    if (itemPhotoKey.isNotEmpty()) put("tilePhotoImageKey", itemPhotoKey)
                     put("fullBoxes", item.fullBoxes)
                     put("loosePieces", item.loosePieces)
                     put("pricePerBox", item.pricePerBox)
@@ -560,6 +750,11 @@ object BackupRestoreHelper {
         }
         root.put("stockMovements", movArr)
 
+        if (imageCollector.count > 0) {
+            root.put("embeddedImages", imageCollector.embeddedImagesJson)
+            root.put("embeddedImageCount", imageCollector.count)
+        }
+
         val backupDir = File(context.filesDir, "backups")
         if (!backupDir.exists()) backupDir.mkdirs()
 
@@ -567,8 +762,9 @@ object BackupRestoreHelper {
         val fileNameDate = SimpleDateFormat("dd_MM_yyyy", Locale.ENGLISH).format(Date())
         val backupFile = File(backupDir, "${fileNameDate}_backup_data.json")
 
+        val outputText = if (imageCollector.count > 0) root.toString() else root.toString(2)
         FileOutputStream(backupFile).use { fos ->
-            fos.write(root.toString(2).toByteArray(Charsets.UTF_8))
+            fos.write(outputText.toByteArray(Charsets.UTF_8))
         }
 
         return backupFile
@@ -600,7 +796,13 @@ object BackupRestoreHelper {
     }
 
     suspend fun createBackup(context: Context, database: AppDatabase): File {
-        val jsonString = exportDatabaseToJson(database)
+        val jsonString = exportDatabaseToJson(
+            database = database,
+            context = context,
+            includeImages = true,
+            maxImageDim = 800,
+            jpegQuality = 78
+        )
 
         val backupDir = File(context.filesDir, "backups")
         if (!backupDir.exists()) backupDir.mkdirs()
@@ -615,15 +817,31 @@ object BackupRestoreHelper {
         return backupFile
     }
 
-    suspend fun restoreFromJsonString(database: AppDatabase, jsonContent: String): Result<String> {
+    suspend fun restoreFromJsonString(
+        database: AppDatabase,
+        jsonContent: String,
+        context: Context? = null
+    ): Result<String> {
         return try {
             val root = JSONObject(jsonContent)
+            val restoredImagesMap = extractEmbeddedImages(context, root)
+            val restoredPhotoByCode = mutableMapOf<String, String>()
+            val restoredPhotoByOldUri = mutableMapOf<String, String>()
+            var restoredTilePhotoCount = 0
 
             database.withTransaction {
                 // Restore settings
                 if (root.has("settings")) {
                     val s = root.getJSONObject("settings")
                     val existing = database.shopSettingsDao().getSettingsSync() ?: ShopSettings()
+                    val logoKey = s.optString("logoImageKey", "")
+                    val rawLogoUri = s.optString("logoUri").ifEmpty { null }
+                    val resolvedLogoUri = when {
+                        logoKey.isNotEmpty() && restoredImagesMap.containsKey(logoKey) -> restoredImagesMap[logoKey]
+                        rawLogoUri != null && isLocalImageAccessible(rawLogoUri) -> rawLogoUri
+                        existing.logoUri != null && isLocalImageAccessible(existing.logoUri) -> existing.logoUri
+                        else -> rawLogoUri ?: existing.logoUri
+                    }
                     val settings = existing.copy(
                         shopName = s.optString("shopName", existing.shopName),
                         subtitle = s.optString("subtitle", existing.subtitle),
@@ -631,7 +849,7 @@ object BackupRestoreHelper {
                         ownerPhone = s.optString("ownerPhone", existing.ownerPhone),
                         altPhone = s.optString("altPhone", existing.altPhone),
                         address = s.optString("address", existing.address),
-                        logoUri = s.optString("logoUri").ifEmpty { existing.logoUri },
+                        logoUri = resolvedLogoUri,
                         gstNumber = s.optString("gstNumber", existing.gstNumber),
                         panNumber = s.optString("panNumber", existing.panNumber),
                         bankName = s.optString("bankName", existing.bankName),
@@ -656,7 +874,8 @@ object BackupRestoreHelper {
                         backupTargetEmail = s.optString("backupTargetEmail", existing.backupTargetEmail),
                         backupScheduledTime = s.optString("backupScheduledTime", existing.backupScheduledTime),
                         backupFromDateString = s.optString("backupFromDateString", existing.backupFromDateString),
-                        lastAutoBackupDate = s.optString("lastAutoBackupDate", existing.lastAutoBackupDate)
+                        lastAutoBackupDate = s.optString("lastAutoBackupDate", existing.lastAutoBackupDate),
+                        pdfSizeDisplayConfigJson = s.optString("pdfSizeDisplayConfigJson", existing.pdfSizeDisplayConfigJson)
                     )
                     database.shopSettingsDao().saveSettings(settings)
                 }
@@ -683,12 +902,40 @@ object BackupRestoreHelper {
                     val arr = root.getJSONArray("products")
                     for (i in 0 until arr.length()) {
                         val po = arr.getJSONObject(i)
+                        val code = po.getString("code")
+                        val rawPhotoUri = po.optString("photoUri").ifEmpty { null }
+                        val photoKey = po.optString("photoImageKey", "")
+                        val inlineB64 = po.optString("photoBase64", "")
+                        val existing = database.tileProductDao().getProductByCode(code)
+
+                        val restoredPath: String? = when {
+                            photoKey.isNotEmpty() && restoredImagesMap.containsKey(photoKey) -> {
+                                restoredTilePhotoCount++
+                                restoredImagesMap[photoKey]
+                            }
+                            inlineB64.isNotEmpty() && context != null -> {
+                                val p = saveBase64ImageToLocalStorage(context, inlineB64)
+                                if (!p.isNullOrBlank()) restoredTilePhotoCount++
+                                p
+                            }
+                            rawPhotoUri != null && isLocalImageAccessible(rawPhotoUri) -> rawPhotoUri
+                            existing?.photoUri != null && isLocalImageAccessible(existing.photoUri) -> existing.photoUri
+                            else -> rawPhotoUri
+                        }
+
+                        if (!restoredPath.isNullOrBlank()) {
+                            restoredPhotoByCode[code] = restoredPath
+                            if (!rawPhotoUri.isNullOrBlank()) {
+                                restoredPhotoByOldUri[rawPhotoUri] = restoredPath
+                            }
+                        }
+
                         val prod = TileProduct(
                             id = po.optLong("id", 0),
-                            code = po.getString("code"),
+                            code = code,
                             name = po.getString("name"),
                             size = po.getString("size"),
-                            photoUri = po.optString("photoUri").ifEmpty { null },
+                            photoUri = restoredPath,
                             description = po.optString("description", ""),
                             piecesPerBox = po.optInt("piecesPerBox", 5),
                             stockPieces = po.optInt("stockPieces", 0),
@@ -696,7 +943,6 @@ object BackupRestoreHelper {
                             purchaseCost = po.optDouble("purchaseCost", 0.0),
                             createdAt = po.optLong("createdAt", System.currentTimeMillis())
                         )
-                        val existing = database.tileProductDao().getProductByCode(prod.code)
                         if (existing != null) {
                             database.tileProductDao().update(prod.copy(id = existing.id))
                         } else {
@@ -758,16 +1004,26 @@ object BackupRestoreHelper {
                     val items = mutableListOf<OrderItemEntity>()
                     for (i in 0 until arr.length()) {
                         val io = arr.getJSONObject(i)
+                        val itemCode = io.getString("tileCode")
+                        val rawItemPhoto = io.optString("tilePhotoUri").ifEmpty { null }
+                        val itemPhotoKey = io.optString("tilePhotoImageKey", "")
+                        val resolvedItemPhoto = when {
+                            itemPhotoKey.isNotEmpty() && restoredImagesMap.containsKey(itemPhotoKey) -> restoredImagesMap[itemPhotoKey]
+                            rawItemPhoto != null && restoredPhotoByOldUri.containsKey(rawItemPhoto) -> restoredPhotoByOldUri[rawItemPhoto]
+                            rawItemPhoto != null && isLocalImageAccessible(rawItemPhoto) -> rawItemPhoto
+                            restoredPhotoByCode.containsKey(itemCode) -> restoredPhotoByCode[itemCode]
+                            else -> rawItemPhoto
+                        }
                         items.add(
                             OrderItemEntity(
                                 id = io.optLong("id", 0),
                                 orderId = io.getLong("orderId"),
                                 productId = io.getLong("productId"),
-                                tileCode = io.getString("tileCode"),
+                                tileCode = itemCode,
                                 tileName = io.getString("tileName"),
                                 tileSize = io.getString("tileSize"),
                                 piecesPerBox = io.getInt("piecesPerBox"),
-                                tilePhotoUri = io.optString("tilePhotoUri").ifEmpty { null },
+                                tilePhotoUri = resolvedItemPhoto,
                                 fullBoxes = io.getInt("fullBoxes"),
                                 loosePieces = io.optInt("loosePieces", 0),
                                 pricePerBox = io.getDouble("pricePerBox"),
@@ -916,7 +1172,12 @@ object BackupRestoreHelper {
                 }
             }
 
-            Result.success("डेटा सफलतापूर्वक रीस्टोर हो गया!")
+            val successMsg = if (restoredImagesMap.isNotEmpty()) {
+                "डेटा और ${restoredImagesMap.size} टाइल/दुकान फोटो सफलतापूर्वक रीस्टोर हो गईं!"
+            } else {
+                "डेटा सफलतापूर्वक रीस्टोर हो गया!"
+            }
+            Result.success(successMsg)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -925,7 +1186,7 @@ object BackupRestoreHelper {
     suspend fun restoreBackup(context: Context, database: AppDatabase, backupFile: File): Result<String> {
         return try {
             val jsonContent = FileInputStream(backupFile).use { it.bufferedReader().readText() }
-            restoreFromJsonString(database, jsonContent)
+            restoreFromJsonString(database, jsonContent, context)
         } catch (e: Exception) {
             Result.failure(e)
         }

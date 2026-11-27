@@ -108,6 +108,7 @@ object TileSampleCatalogPdfGenerator {
         }
 
         val pdfDocument = PdfDocument()
+        val pdfSizeConfig = PdfSizeDisplayConfig.fromJson(settings.pdfSizeDisplayConfigJson)
 
         // 4 tiles per page (2 columns x 2 rows) allows generous space for large proportional image and complete itemized details
         val itemsPerPage = 4
@@ -201,7 +202,7 @@ object TileSampleCatalogPdfGenerator {
                 val cardBottom = cardTop + cardHeight
 
                 val product = filteredList[idx]
-                val dim = parseTileDimension(product.size)
+                val resolved = PdfSizeDisplayConfig.resolveForTile(product.size, pdfSizeConfig)
 
                 // Draw Tile Card
                 paint.style = Paint.Style.FILL
@@ -214,7 +215,7 @@ object TileSampleCatalogPdfGenerator {
                 canvas.drawRoundRect(RectF(cardLeft, cardTop, cardRight, cardBottom), 8f, 8f, paint)
                 paint.style = Paint.Style.FILL
 
-                // Proportional Tile Image Box (User requested true size proportion!)
+                // Proportional Tile Image Box respecting user's custom PDF Size Display rules!
                 // Maximum image area inside card: width = cardWidth - 20, height = 135
                 val imgAreaLeft = cardLeft + 10f
                 val imgAreaTop = cardTop + 10f
@@ -225,54 +226,20 @@ object TileSampleCatalogPdfGenerator {
                 paint.color = Color.rgb(241, 245, 249)
                 canvas.drawRoundRect(RectF(imgAreaLeft, imgAreaTop, imgAreaLeft + imgAreaWidth, imgAreaTop + imgAreaHeight), 6f, 6f, paint)
 
-                // Proportional scale: tiles scale according to physical size, filling the image area nicely!
-                // 2x4 slab is the largest occupying full area (~230x115).
-                // 12x18 is slightly smaller (~185x123), maintaining realistic proportion and filling the card.
-                val maxAllowedW = imgAreaWidth - 8f   // ~231f
-                val maxAllowedH = imgAreaHeight - 8f  // ~127f
-
-                // Base ratio (w / h)
-                val ratio = if (dim.heightFeet > 0f) dim.widthFeet / dim.heightFeet else 1f
-                
-                // If 2x4 (ratio 2.0 or 0.5) or larger slab:
-                val isLargeSlab = dim.widthFeet >= 3.5f || dim.heightFeet >= 3.5f || (dim.widthFeet >= 2f && dim.heightFeet >= 3.5f)
-                val isMediumTile = (dim.widthFeet in 1.2f..1.8f && dim.heightFeet in 0.9f..1.6f) || (dim.widthFeet in 0.9f..1.6f && dim.heightFeet in 1.2f..1.8f) // e.g. 12x18
+                val maxAllowedW = imgAreaWidth - 8f
+                val maxAllowedH = imgAreaHeight - 8f
+                val ratio = resolved.renderAspectRatioWtoH.coerceIn(0.35f, 3.0f)
+                val targetW = maxAllowedW * resolved.scaleFactor
+                val targetH = maxAllowedH * resolved.scaleFactor
 
                 var renderW: Float
                 var renderH: Float
-
-                if (isLargeSlab) {
-                    // Full size fill for 2x4
-                    if (ratio >= 1f) {
-                        renderW = maxAllowedW
-                        renderH = (renderW / ratio).coerceAtMost(maxAllowedH)
-                    } else {
-                        renderH = maxAllowedH
-                        renderW = (renderH * ratio).coerceAtMost(maxAllowedW)
-                    }
-                } else if (isMediumTile) {
-                    // 12x18 is slightly smaller than 2x4, filling ~80% of area
-                    val targetW = maxAllowedW * 0.82f
-                    val targetH = maxAllowedH * 0.88f
-                    if (ratio >= 1f) {
-                        renderW = targetW
-                        renderH = (renderW / ratio).coerceAtMost(maxAllowedH)
-                    } else {
-                        renderH = targetH
-                        renderW = (renderH * ratio).coerceAtMost(maxAllowedW)
-                    }
+                if (targetW / targetH > ratio) {
+                    renderH = targetH
+                    renderW = renderH * ratio
                 } else {
-                    // For standard squares or smaller sizes (e.g. 2x2, 1x1, 16x16)
-                    val scale = (dim.widthFeet / 4f).coerceIn(0.65f, 0.95f)
-                    val fitW = maxAllowedW * scale
-                    val fitH = maxAllowedH * scale
-                    if (ratio >= 1f) {
-                        renderW = fitW
-                        renderH = (renderW / ratio).coerceAtMost(maxAllowedH)
-                    } else {
-                        renderH = fitH
-                        renderW = (renderH * ratio).coerceAtMost(maxAllowedW)
-                    }
+                    renderW = targetW
+                    renderH = renderW / ratio
                 }
 
                 // Final safety bounds
@@ -286,11 +253,8 @@ object TileSampleCatalogPdfGenerator {
                     renderW *= s
                     renderH *= s
                 }
-                if (renderW < 90f && maxAllowedW >= 90f) {
-                    val s = 90f / renderW
-                    renderW *= s
-                    renderH = renderH.coerceAtMost(maxAllowedH)
-                }
+                renderW = renderW.coerceAtLeast(36f)
+                renderH = renderH.coerceAtLeast(36f)
 
                 // Center within image area
                 val renderLeft = imgAreaLeft + (imgAreaWidth - renderW) / 2f
@@ -306,7 +270,12 @@ object TileSampleCatalogPdfGenerator {
                 if (config.showPhoto && !product.photoUri.isNullOrBlank()) {
                     val bitmap = loadBitmap(context, product.photoUri)
                     if (bitmap != null) {
-                        canvas.drawBitmap(bitmap, null, renderRect, paint)
+                        val srcRect = if (resolved.imageFitMode == PdfImageScaleMode.CENTER_CROP) {
+                            PdfSizeDisplayConfig.computeCenterCropSrcRect(bitmap.width, bitmap.height, renderW, renderH)
+                        } else {
+                            null
+                        }
+                        canvas.drawBitmap(bitmap, srcRect, renderRect, paint)
                         photoDrawn = true
                     }
                 }
@@ -338,9 +307,9 @@ object TileSampleCatalogPdfGenerator {
                     paint.style = Paint.Style.FILL
                     paint.textAlign = Paint.Align.CENTER
                     paint.color = Color.rgb(71, 85, 105)
-                    paint.textSize = 9.5f
+                    paint.textSize = if (renderW < 75f) 7.5f else 9.5f
                     paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                    canvas.drawText("${product.size} (${String.format(Locale.US, "%.1f", dim.widthFeet)}×${String.format(Locale.US, "%.1f", dim.heightFeet)} Ft)", renderRect.centerX(), renderRect.centerY() + 3f, paint)
+                    canvas.drawText(resolved.sizeLabelForPdf, renderRect.centerX(), renderRect.centerY() + 3f, paint)
                 }
 
                 // Border around tile image
@@ -350,18 +319,23 @@ object TileSampleCatalogPdfGenerator {
                 canvas.drawRoundRect(renderRect, 6f, 6f, paint)
                 paint.style = Paint.Style.FILL
 
-                // Dimension Badge at bottom of image
-                paint.textAlign = Paint.Align.CENTER
-                paint.color = Color.argb(220, 15, 23, 42)
-                val badgeW = 90f
-                val badgeH = 14f
-                val badgeRect = RectF(renderRect.centerX() - badgeW / 2f, renderRect.bottom - badgeH - 3f, renderRect.centerX() + badgeW / 2f, renderRect.bottom - 3f)
-                canvas.drawRoundRect(badgeRect, 3f, 3f, paint)
+                // Dimension Badge at bottom of image (configurable per size in Settings)
+                if (resolved.showDimensionBadge && config.showSizeAndProportion) {
+                    paint.textAlign = Paint.Align.CENTER
+                    paint.textSize = 6.8f
+                    paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                    val badgeText = resolved.badgeTextForCatalog
+                    val measuredW = paint.measureText(badgeText) + 12f
+                    val badgeW = measuredW.coerceIn(64f, imgAreaWidth - 10f)
+                    val badgeH = 14f
+                    val badgeCenterX = renderRect.centerX().coerceIn(imgAreaLeft + badgeW / 2f + 2f, imgAreaLeft + imgAreaWidth - badgeW / 2f - 2f)
+                    val badgeRect = RectF(badgeCenterX - badgeW / 2f, renderRect.bottom - badgeH - 3f, badgeCenterX + badgeW / 2f, renderRect.bottom - 3f)
+                    paint.color = Color.argb(220, 15, 23, 42)
+                    canvas.drawRoundRect(badgeRect, 3f, 3f, paint)
 
-                paint.color = Color.WHITE
-                paint.textSize = 7f
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                canvas.drawText("${dim.widthFeet} Ft × ${dim.heightFeet} Ft (${dim.areaSqFtPerPiece} Sq.Ft/pc)", renderRect.centerX(), badgeRect.centerY() + 2.5f, paint)
+                    paint.color = Color.WHITE
+                    canvas.drawText(badgeText, badgeCenterX, badgeRect.centerY() + 2.5f, paint)
+                }
 
                 // Tile Details Section under image (User requested: Code, name, quality, kitni bachi hai, kitne feet hogi, ek box me kitni tile)
                 var textY = imgAreaTop + imgAreaHeight + 14f
@@ -397,13 +371,18 @@ object TileSampleCatalogPdfGenerator {
                 if (config.showPiecesPerBox) {
                     paint.color = textMuted
                     paint.textSize = 8f
-                    canvas.drawText("साइज़: ${product.size} (${dim.displaySize})", cardLeft + 10f, textY, paint)
+                    val sizeLine = if (resolved.sizeLabelForPdf == resolved.detailSubLabel) {
+                        "साइज़: ${resolved.sizeLabelForPdf}"
+                    } else {
+                        "साइज़: ${resolved.sizeLabelForPdf} (${resolved.detailSubLabel})"
+                    }
+                    canvas.drawText(sizeLine.take(44), cardLeft + 10f, textY, paint)
                     textY += 11f
 
                     paint.color = textDark
                     paint.textSize = 8.5f
                     paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                    canvas.drawText("पैकिंग: ${product.piecesPerBox} टाइल्स / बॉक्स (${String.format(Locale.US, "%.2f", product.piecesPerBox * dim.areaSqFtPerPiece)} Sq.Ft/Box)", cardLeft + 10f, textY, paint)
+                    canvas.drawText("पैकिंग: ${product.piecesPerBox} टाइल्स / बॉक्स (${String.format(Locale.US, "%.2f", product.piecesPerBox * resolved.areaSqFtPerPiece)} Sq.Ft/Box)", cardLeft + 10f, textY, paint)
                     paint.typeface = Typeface.DEFAULT
                     textY += 12f
                 }
@@ -422,7 +401,7 @@ object TileSampleCatalogPdfGenerator {
 
                 // 5. Total Available Area in Square Feet
                 if (config.showTotalSqFt) {
-                    val totalSqFt = product.stockPieces * dim.areaSqFtPerPiece
+                    val totalSqFt = product.stockPieces * resolved.areaSqFtPerPiece
                     paint.color = primaryColor
                     paint.textSize = 9f
                     paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
@@ -436,8 +415,8 @@ object TileSampleCatalogPdfGenerator {
                     paint.color = textDark
                     paint.textSize = 9f
                     paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                    val sqFtRate = if (product.piecesPerBox > 0 && dim.areaSqFtPerPiece > 0) {
-                        product.defaultSellingPrice / (product.piecesPerBox * dim.areaSqFtPerPiece)
+                    val sqFtRate = if (product.piecesPerBox > 0 && resolved.areaSqFtPerPiece > 0) {
+                        product.defaultSellingPrice / (product.piecesPerBox * resolved.areaSqFtPerPiece)
                     } else 0.0
                     val priceText = "बिक्री मूल्य: ₹${String.format(Locale.US, "%,.0f", product.defaultSellingPrice)} / बॉक्स (₹${String.format(Locale.US, "%.1f", sqFtRate)}/sq.ft)"
                     canvas.drawText(priceText, cardLeft + 10f, textY, paint)

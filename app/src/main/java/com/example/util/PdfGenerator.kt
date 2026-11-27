@@ -63,6 +63,7 @@ object PdfGenerator {
         val order = orderWithItems.order
         val items = orderWithItems.items
         val showPrices = order.showPriceOnPdf
+        val pdfSizeConfig = PdfSizeDisplayConfig.fromJson(settings.pdfSizeDisplayConfigJson)
 
         // Color definitions dynamically derived from Shop App Theme
         val themeOption = com.example.ui.theme.getAppThemeOption(settings.appTheme)
@@ -342,26 +343,48 @@ object PdfGenerator {
             paint.textAlign = Paint.Align.LEFT
             canvas.drawText("${i + 1}", MARGIN + 6f, currentY + 24f, paint)
 
-            // Thumbnail Photo with true proportional dimensions based on tile size (e.g. 1.5:1 for 12x18, 2:1 for 2x4)
-            val maxThumbW = 40f
-            val maxThumbH = 32f
-            val dim = TileSampleCatalogPdfGenerator.parseTileDimension(item.tileSize)
-            val ratio = dim.ratioWtoH.coerceIn(0.5f, 2.2f)
-            var renderW = maxThumbW
-            var renderH = renderW / ratio
-            if (renderH > maxThumbH) {
-                renderH = maxThumbH
+            // Thumbnail Photo respecting user's custom PDF Size Display rules (orientation, scale, fit/crop, label)
+            val maxThumbW = 42f
+            val maxThumbH = 34f
+            val resolvedSize = PdfSizeDisplayConfig.resolveForTile(item.tileSize, pdfSizeConfig)
+            val ratio = resolvedSize.renderAspectRatioWtoH.coerceIn(0.4f, 2.5f)
+            val thumbScale = if (resolvedSize.hasCustomScale) resolvedSize.scaleFactor.coerceIn(0.55f, 1.0f) else 1.0f
+            val targetThumbW = maxThumbW * thumbScale
+            val targetThumbH = maxThumbH * thumbScale
+
+            var renderW: Float
+            var renderH: Float
+            if (targetThumbW / targetThumbH > ratio) {
+                renderH = targetThumbH
                 renderW = renderH * ratio
+            } else {
+                renderW = targetThumbW
+                renderH = renderW / ratio
+            }
+            if (renderW > maxThumbW) {
+                val s = maxThumbW / renderW
+                renderW *= s
+                renderH *= s
+            }
+            if (renderH > maxThumbH) {
+                val s = maxThumbH / renderH
+                renderW *= s
+                renderH *= s
             }
             val thumbLeft = MARGIN + 20f + (maxThumbW - renderW) / 2f
-            val thumbTop = currentY + 6f + (maxThumbH - renderH) / 2f
+            val thumbTop = currentY + 5f + (maxThumbH - renderH) / 2f
             val thumbRect = RectF(thumbLeft, thumbTop, thumbLeft + renderW, thumbTop + renderH)
 
             var photoDrawn = false
             if (!item.tilePhotoUri.isNullOrBlank()) {
                 val bitmap = loadBitmap(context, item.tilePhotoUri)
                 if (bitmap != null) {
-                    canvas.drawBitmap(bitmap, null, thumbRect, paint)
+                    val srcRect = if (resolvedSize.imageFitMode == PdfImageScaleMode.CENTER_CROP) {
+                        PdfSizeDisplayConfig.computeCenterCropSrcRect(bitmap.width, bitmap.height, renderW, renderH)
+                    } else {
+                        null
+                    }
+                    canvas.drawBitmap(bitmap, srcRect, thumbRect, paint)
                     photoDrawn = true
                 }
             }
@@ -377,9 +400,9 @@ object PdfGenerator {
                 paint.style = Paint.Style.FILL
 
                 paint.color = textMuted
-                paint.textSize = 6.5f
+                paint.textSize = 6f
                 paint.textAlign = Paint.Align.CENTER
-                canvas.drawText(item.tileSize, thumbRect.centerX(), thumbRect.centerY() + 2.5f, paint)
+                canvas.drawText(resolvedSize.sizeLabelForPdf.take(10), thumbRect.centerX(), thumbRect.centerY() + 2.5f, paint)
             }
 
             // Tile Description & Size
@@ -393,7 +416,7 @@ object PdfGenerator {
             paint.typeface = Typeface.DEFAULT
             paint.textSize = 8f
             paint.color = textMuted
-            val detailsStr = "Code: ${item.tileCode} | Size: ${item.tileSize}"
+            val detailsStr = "Code: ${item.tileCode} | Size: ${resolvedSize.sizeLabelForPdf}"
             canvas.drawText(detailsStr, MARGIN + 72f, currentY + 32f, paint)
 
             // Quantities

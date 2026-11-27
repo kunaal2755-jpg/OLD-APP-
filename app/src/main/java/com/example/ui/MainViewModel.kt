@@ -298,8 +298,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val user = com.example.data.security.UserSessionManager.getCurrentUser(getApplication())
             val phone = user?.phone ?: "9876543210"
             com.example.util.PermanentVaultHelper.saveShopSnapshot(getApplication(), repository.database, phone)
-            val json = com.example.util.BackupRestoreHelper.exportDatabaseToJson(repository.database)
-            val res = com.example.util.PermanentVaultHelper.uploadCloudBackup(json, expiryDays = 365)
+            val compactWithImages = com.example.util.BackupRestoreHelper.exportDatabaseToJson(
+                database = repository.database,
+                context = getApplication(),
+                includeImages = true,
+                maxImageDim = 360,
+                jpegQuality = 55
+            )
+            val payload = if (compactWithImages.length <= 450_000) {
+                compactWithImages
+            } else {
+                com.example.util.BackupRestoreHelper.exportDatabaseToJson(
+                    database = repository.database,
+                    context = getApplication(),
+                    includeImages = false
+                )
+            }
+            var res = com.example.util.PermanentVaultHelper.uploadCloudBackup(payload, expiryDays = 365)
+            if (res.isFailure && payload === compactWithImages) {
+                val lightFallback = com.example.util.BackupRestoreHelper.exportDatabaseToJson(
+                    database = repository.database,
+                    context = getApplication(),
+                    includeImages = false
+                )
+                res = com.example.util.PermanentVaultHelper.uploadCloudBackup(lightFallback, expiryDays = 365)
+            }
             res.fold(
                 onSuccess = { code ->
                     showMessage("क्लाउड सिंक कोड: $code")
@@ -314,10 +337,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun restoreFromCloudSyncCode(code: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            val res = com.example.util.PermanentVaultHelper.downloadAndRestoreCloudBackup(repository.database, code)
+            val res = com.example.util.PermanentVaultHelper.downloadAndRestoreCloudBackup(
+                database = repository.database,
+                cloudCodeOrUrl = code,
+                context = getApplication()
+            )
             res.fold(
-                onSuccess = {
-                    showMessage("डेटा सफलतापूर्वक क्लाउड से रीस्टोर हुआ!")
+                onSuccess = { msg ->
+                    showMessage(msg.ifBlank { "डेटा सफलतापूर्वक क्लाउड से रीस्टोर हुआ!" })
                     onSuccess()
                 },
                 onFailure = { err ->
@@ -1163,7 +1190,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 backupTargetEmail = backupTargetEmail.trim(),
                 backupScheduledTime = backupScheduledTime.trim().ifBlank { "20:00" },
                 backupFromDateString = backupFromDateString.trim(),
-                lastAutoBackupDate = currentSettings.lastAutoBackupDate
+                lastAutoBackupDate = currentSettings.lastAutoBackupDate,
+                pdfSizeDisplayConfigJson = currentSettings.pdfSizeDisplayConfigJson
             )
             repository.saveSettings(s)
 
@@ -1184,6 +1212,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             triggerAutoVaultSave()
             showMessage("दुकान व सेटिंग्स सुरक्षित हो गईं!")
+        }
+    }
+
+    fun savePdfSizeDisplayConfig(configJson: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentSettings = repository.getCurrentShopSettings()
+            repository.saveSettings(currentSettings.copy(pdfSizeDisplayConfigJson = configJson))
+            triggerAutoVaultSave()
+            showMessage("PDF टाइल साइज़ डिस्प्ले सेटिंग सेव हो गई!")
         }
     }
 
@@ -1273,7 +1310,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val file = BackupRestoreHelper.createBackup(context, database)
-                showMessage("Backup created: ${file.name}")
+                showMessage("बैकअप (टाइल फोटो सहित) तैयार: ${file.name}")
                 onDone(file)
             } catch (e: Exception) {
                 onError("Backup failed: ${e.localizedMessage}")
@@ -1285,7 +1322,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val result = BackupRestoreHelper.restoreBackup(context, database, backupFile)
             if (result.isSuccess) {
-                showMessage("Backup restored successfully!")
+                showMessage(result.getOrNull() ?: "Backup restored successfully!")
                 onDone()
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Failed to restore backup")

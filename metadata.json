@@ -1,6 +1,6 @@
 {
-  "name": "TILES AND MARBLES",
-  "description": "Business management app for TILES AND MARBLES - tile inventory, customer orders, size-based pricing, stock management, staff attendance & salary slips, and Telegram Bot smart alerts.",
+  "name": "Mourya Tiles",
+  "description": "Tiles and Marbles Billing, Stock, Returns, Attendance & Management App",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

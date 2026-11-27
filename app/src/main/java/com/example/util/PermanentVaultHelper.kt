@@ -403,17 +403,30 @@ object PermanentVaultHelper {
             val cleanPhone = userPhone.trim()
             if (cleanPhone.isBlank()) return@withContext Result.failure(IllegalArgumentException("Phone required"))
 
-            val json = BackupRestoreHelper.exportDatabaseToJson(database)
+            // Export full backup with tile images for persistent MediaStore Vault (survives Clear Data!)
+            val fullVaultJson = BackupRestoreHelper.exportDatabaseToJson(
+                database = database,
+                context = context,
+                includeImages = true,
+                maxImageDim = 800,
+                jpegQuality = 75
+            )
+            // Lightweight JSON without large base64 blobs for SQLite TEXT column (avoids 2MB CursorWindow limit)
+            val lightJson = BackupRestoreHelper.exportDatabaseToJson(
+                database = database,
+                context = context,
+                includeImages = false
+            )
             val now = System.currentTimeMillis()
 
-            // 1. Update in local DB user entity
+            // 1. Update in local DB user entity (size-safe)
             try {
-                database.appUserDao().saveCloudBackup(cleanPhone, json, now)
+                database.appUserDao().saveCloudBackup(cleanPhone, lightJson, now)
             } catch (_: Exception) {}
 
-            // 2. Write to vault under phone-specific file and latest universal file
-            writeVaultFile(context, "vault_${cleanPhone}.json", json)
-            writeVaultFile(context, "vault_latest.json", json)
+            // 2. Write full backup (including tile photos) to vault under phone-specific & latest universal file
+            writeVaultFile(context, "vault_${cleanPhone}.json", fullVaultJson)
+            writeVaultFile(context, "vault_latest.json", fullVaultJson)
 
             // 3. Update users registry
             try {
@@ -423,9 +436,17 @@ object PermanentVaultHelper {
                 }
             } catch (_: Exception) {}
 
-            // 4. Cloud sync for phone (survives OS Clear Data on any device!)
+            // 4. Cloud sync for phone (try compact images first, fallback to lightJson if too large)
             try {
-                val pasteUrl = uploadToPasteRs(json)
+                val compactCloudJson = BackupRestoreHelper.exportDatabaseToJson(
+                    database = database,
+                    context = context,
+                    includeImages = true,
+                    maxImageDim = 360,
+                    jpegQuality = 55
+                )
+                val cloudPayload = if (compactCloudJson.length <= 450_000) compactCloudJson else lightJson
+                val pasteUrl = uploadToPasteRs(cloudPayload) ?: if (cloudPayload !== lightJson) uploadToPasteRs(lightJson) else null
                 if (!pasteUrl.isNullOrBlank()) {
                     publishKeyValToCloud("vault_${cleanPhone}", pasteUrl)
                 }
@@ -433,8 +454,8 @@ object PermanentVaultHelper {
                 Log.w(TAG, "Cloud sync snapshot error", ce)
             }
 
-            Log.i(TAG, "Shop snapshot saved successfully for phone: $cleanPhone (${json.length} bytes)")
-            Result.success("सुरक्षित बैकअप वॉल्ट व क्लाउड में सेव हो गया!")
+            Log.i(TAG, "Shop snapshot saved successfully for phone: $cleanPhone (${fullVaultJson.length} bytes)")
+            Result.success("सुरक्षित बैकअप (टाइल फोटो सहित) वॉल्ट व क्लाउड में सेव हो गया!")
         } catch (e: Exception) {
             Log.e(TAG, "Failed saving shop snapshot", e)
             Result.failure(e)
@@ -495,7 +516,7 @@ object PermanentVaultHelper {
             }
 
             if (!json.isNullOrBlank()) {
-                val res = BackupRestoreHelper.restoreFromJsonString(database, json)
+                val res = BackupRestoreHelper.restoreFromJsonString(database, json, context)
                 if (res.isSuccess) {
                     Log.i(TAG, "Successfully restored shop snapshot for $cleanPhone")
                     Result.success(true)
@@ -1233,7 +1254,8 @@ object PermanentVaultHelper {
      */
     suspend fun downloadAndRestoreCloudBackup(
         database: AppDatabase,
-        cloudCodeOrUrl: String
+        cloudCodeOrUrl: String,
+        context: Context? = null
     ): Result<String> = withContext(Dispatchers.IO) {
         return@withContext try {
             val input = cloudCodeOrUrl.trim()
@@ -1255,7 +1277,7 @@ object PermanentVaultHelper {
                 if (json.isBlank()) {
                     Result.failure(Exception("क्लाउड बैकअप खाली है"))
                 } else {
-                    BackupRestoreHelper.restoreFromJsonString(database, json)
+                    BackupRestoreHelper.restoreFromJsonString(database, json, context)
                 }
             } else {
                 Result.failure(Exception("क्लाउड से डेटा नहीं मिला (HTTP $responseCode)"))

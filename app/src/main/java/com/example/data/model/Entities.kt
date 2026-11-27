@@ -46,7 +46,9 @@ data class ShopSettings(
     val backupTargetEmail: String = "",
     val backupScheduledTime: String = "20:00", // 8:00 PM default
     val backupFromDateString: String = "", // e.g. "01/11/2026"
-    val lastAutoBackupDate: String = ""
+    val lastAutoBackupDate: String = "",
+    // Custom PDF Tile Size Display Configuration (JSON)
+    val pdfSizeDisplayConfigJson: String = ""
 )
 
 @Entity(tableName = "size_pricing")
