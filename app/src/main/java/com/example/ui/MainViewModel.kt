@@ -99,19 +99,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
+            repository.ensureDefaultLocationsExist()
             val sessionUser = com.example.data.security.UserSessionManager.getCurrentUser(getApplication())
             if (sessionUser != null) {
-                val cleanPhone = sessionUser.phone.trim()
-                if (com.example.util.PermanentVaultHelper.isPhoneDeleted(cleanPhone, getApplication())) {
-                    triggerForcedLogout("⚠️ आपका खाता (User ID: $cleanPhone) एडमिन द्वारा हटा दिया गया है।")
+                val normPhone = com.example.util.PermanentVaultHelper.normalizePhone(sessionUser.phone)
+                if (com.example.util.PermanentVaultHelper.isPhoneDeleted(normPhone, getApplication())) {
+                    triggerForcedLogout("⚠️ आपका खाता (User ID: $normPhone) एडमिन द्वारा हटा दिया गया है।")
                 }
             }
             repository.ensureDefaultUserExists()
             repository.purgeOldRecycleBinItems()
             if (sessionUser != null) {
-                val dbUser = repository.getUserById(sessionUser.id) ?: repository.getUserByPhone(sessionUser.phone)
+                val normPhone = com.example.util.PermanentVaultHelper.normalizePhone(sessionUser.phone)
+                val dbUser = repository.getUserById(sessionUser.id)
+                    ?: repository.getUserByPhone(normPhone)
+                    ?: repository.getUserByPhone(sessionUser.phone)
                 if (dbUser != null) {
                     com.example.data.security.UserSessionManager.saveSession(getApplication(), dbUser)
+                    com.example.util.PermanentVaultHelper.publishUserPresence(dbUser)
                     val s = repository.getCurrentShopSettings()
                     if (s.shopName.isBlank() || s.ownerPhone.isBlank() || s.shopName.contains("Mourya", ignoreCase = true)) {
                         val updated = s.copy(
@@ -121,18 +126,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         repository.saveSettings(updated)
                     }
+                } else {
+                    com.example.util.PermanentVaultHelper.publishUserPresence(sessionUser)
                 }
             }
 
-            // Continuous sub-second session monitor: Auto-logout within 1 sec if deleted or blocked
+            // Real-time Admin -> User Control Monitor (every 3s: fast, reliable, zero rate-limit!)
             var tickCount = 0
             while (isActive) {
-                kotlinx.coroutines.delay(600)
+                if (tickCount > 0) {
+                    kotlinx.coroutines.delay(3000)
+                }
                 tickCount++
                 try {
+                    // Always keep AdminGlobalConfig synced even on Login screen (so Maintenance Mode & Self-Reg flag work before login!)
+                    if (tickCount == 1 || tickCount % 2 == 0) {
+                        val liveConfig = com.example.util.PermanentVaultHelper.fetchLiveCloudAdminConfig()
+                        if (liveConfig != null) {
+                            repository.adminGlobalConfigDao.saveConfig(liveConfig)
+                            checkForAppUpdate(liveConfig)
+                            val activeSess = com.example.data.security.UserSessionManager.getCurrentUser(getApplication())
+                            if (activeSess != null && _currentScreen.value !is Screen.Login && liveConfig.isMaintenanceMode && activeSess.role != "ADMIN") {
+                                triggerForcedLogout(liveConfig.maintenanceMessage.ifBlank { "⚠️ एडमिन द्वारा इमरजेंसी मोड चालू किया गया है। ऐप तुरंत बंद हो रहा है।" })
+                                continue
+                            }
+                        }
+                    }
+
                     val currentSession = com.example.data.security.UserSessionManager.getCurrentUser(getApplication())
                     if (currentSession != null && _currentScreen.value !is Screen.Login) {
-                        val sessionPhone = currentSession.phone.trim()
+                        val sessionPhone = com.example.util.PermanentVaultHelper.normalizePhone(currentSession.phone)
 
                         // 1. Instant local blacklist check (0ms)
                         if (com.example.util.PermanentVaultHelper.isPhoneDeleted(sessionPhone, getApplication())) {
@@ -142,7 +165,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         // 2. Check local database record
-                        val localUser = repository.getUserByPhone(sessionPhone)
+                        val localUser = repository.getUserByPhone(sessionPhone) ?: repository.getUserByPhone(currentSession.phone.trim())
                         if (localUser != null) {
                             if (!localUser.isActive || localUser.approvalStatus == "BLOCKED" || localUser.approvalStatus == "REJECTED") {
                                 triggerForcedLogout("⚠️ आपका अकाउंट एडमिन द्वारा ब्लॉक (Blocked) कर दिया गया है। आप तुरंत लॉगआउट कर दिए गए हैं।")
@@ -155,7 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
 
-                        // 3. Fast sub-second cloud session revocation check (via ntfy session topic)
+                        // 3. Real-time Cloud Session Revocation Check (Dual KV: textdb.dev + textdb.online)
                         val revState = com.example.util.PermanentVaultHelper.checkCloudSessionRevocation(sessionPhone)
                         if (revState == com.example.util.CloudSessionState.DELETED) {
                             com.example.util.PermanentVaultHelper.markPhoneDeleted(sessionPhone, getApplication())
@@ -170,57 +193,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             continue
                         }
 
-                        // 4. Periodically (every ~15s) check Admin Maintenance Mode and Subscription Expiry
-                        if (tickCount % 10 == 0) {
-                            val liveConfig = com.example.util.PermanentVaultHelper.fetchLiveCloudAdminConfig()
-                            if (liveConfig != null) {
-                                repository.adminGlobalConfigDao.saveConfig(liveConfig)
-                                checkForAppUpdate(liveConfig)
-                                if (liveConfig.isMaintenanceMode && currentSession.role != "ADMIN") {
-                                    triggerForcedLogout(liveConfig.maintenanceMessage.ifBlank { "⚠️ एडमिन द्वारा इमरजेंसी मोड चालू किया गया है। ऐप तुरंत बंद हो रहा है।" })
+                        // 4. Live Cloud User Profile Sync (every ~6s & on launch): catches Password change, Validity Expiry, Block, Name/Shop update!
+                        if (tickCount == 1 || tickCount % 2 == 0) {
+                            val liveUser = com.example.util.PermanentVaultHelper.fetchLiveCloudUser(sessionPhone)
+                            if (liveUser != null) {
+                                if (liveUser.approvalStatus == "DELETED") {
+                                    com.example.util.PermanentVaultHelper.markPhoneDeleted(sessionPhone, getApplication())
+                                    repository.appUserDao.deleteByPhone(sessionPhone)
+                                    triggerForcedLogout("⚠️ आपका खाता एडमिन द्वारा हटा (Delete) दिया गया है।")
+                                    continue
+                                }
+                                if (!liveUser.isActive || liveUser.approvalStatus == "BLOCKED" || liveUser.approvalStatus == "REJECTED") {
+                                    if (localUser != null) {
+                                        repository.appUserDao.update(liveUser.copy(id = localUser.id, isActive = false, approvalStatus = liveUser.approvalStatus))
+                                    }
+                                    triggerForcedLogout("⚠️ आपका अकाउंट एडमिन द्वारा ब्लॉक (Blocked) कर दिया गया है। कृपया एडमिन से संपर्क करें।")
+                                    continue
+                                }
+                                // Password changed remotely by Admin -> force re-login with new password
+                                if (liveUser.password.isNotBlank() && currentSession.password.isNotBlank() &&
+                                    liveUser.password.trim() != currentSession.password.trim()
+                                ) {
+                                    if (localUser != null) {
+                                        repository.appUserDao.update(liveUser.copy(id = localUser.id))
+                                    }
+                                    triggerForcedLogout("🔑 एडमिन द्वारा आपका पासवर्ड बदल दिया गया है। कृपया नए पासवर्ड से दोबारा लॉगिन करें।")
+                                    continue
+                                }
+                                // Sync updated expiry, planName, name, shopName silently
+                                val syncedUser = if (localUser != null) {
+                                    val merged = liveUser.copy(id = localUser.id)
+                                    repository.appUserDao.update(merged)
+                                    merged
+                                } else {
+                                    val newId = repository.appUserDao.insert(liveUser)
+                                    liveUser.copy(id = newId)
+                                }
+                                com.example.data.security.UserSessionManager.saveSession(getApplication(), syncedUser)
+
+                                val now = System.currentTimeMillis()
+                                if (syncedUser.expiresAt in 1..now) {
+                                    triggerForcedLogout("⚠️ आपका सब्सक्रिप्शन समाप्त (Expired) हो गया है। कृपया रिन्यू कराएं।")
+                                    continue
+                                }
+                            } else {
+                                val now = System.currentTimeMillis()
+                                if (currentSession.expiresAt in 1..now) {
+                                    triggerForcedLogout("⚠️ आपका सब्सक्रिप्शन समाप्त (Expired) हो गया है। कृपया रिन्यू कराएं।")
                                     continue
                                 }
                             }
-
-                            val now = System.currentTimeMillis()
-                            if (currentSession.expiresAt in 1..now) {
-                                triggerForcedLogout("⚠️ आपका सब्सक्रिप्शन समाप्त (Expired) हो गया है। कृपया रिन्यू कराएं।")
-                                continue
-                            }
                         }
 
-                        // 5. Evening Scheduled Auto-Backup & Auto-Attendance Check (every ~30s)
-                        if (tickCount % 30 == 0) {
+                        // 5. Scheduled Auto-Backup & Auto-Attendance Check (every ~30s while app open + AlarmManager when closed!)
+                        if (tickCount == 1 || tickCount % 10 == 0) {
                             try {
                                 val s = repository.getCurrentShopSettings()
-                                val todayStr = SimpleDateFormat("dd/MM/yyyy", Locale.ENGLISH).format(Date())
+                                com.example.util.BackgroundScheduler.syncAllSchedules(getApplication(), s)
 
-                                if (s.autoAttendanceEnabled) {
-                                    repository.autoMarkPresentForDate(todayStr)
+                                val todayYyyyMmDd = SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH).format(Date())
+                                if (s.autoAttendanceEnabled &&
+                                    s.lastAutoAttendanceDate != todayYyyyMmDd &&
+                                    com.example.util.BackgroundScheduler.isCurrentTimeAtOrPast(s.autoAttendanceTime, 9, 0)
+                                ) {
+                                    com.example.util.BackgroundScheduler.executeAutoAttendanceNow(getApplication(), forceRun = false)
                                 }
 
-                                if (s.autoBackupEnabled) {
-                                    val nowTimeStr = SimpleDateFormat("HH:mm", Locale.ENGLISH).format(Date())
-                                    val schedTime = s.backupScheduledTime.ifBlank { "20:00" }
-                                    if (nowTimeStr >= schedTime && s.lastAutoBackupDate != todayStr) {
-                                        val backupFile = BackupRestoreHelper.createCumulativeBackupFile(
-                                            getApplication(),
-                                            repository.database,
-                                            s.backupFromDateString
-                                        )
-                                        repository.saveSettings(s.copy(lastAutoBackupDate = todayStr))
-                                        try {
-                                            val tgConfig = getActiveTelegramConfig()
-                                            com.example.util.TelegramNotifier.sendActiveMessage(
-                                                tgConfig,
-                                                "📦 *दैनिक शाम का ऑटो-बैकअप सुरक्षित हुआ*\n" +
-                                                "फ़ाइल नाम: `${backupFile.name}`\n" +
-                                                "तारीख: $todayStr (शाम $nowTimeStr)\n" +
-                                                if (s.backupTargetEmail.isNotBlank()) "ईमेल / ड्राइव: ${s.backupTargetEmail}\n" else "" +
-                                                "कस्टम बैकअप डेटा सेव कर दिया गया है।"
-                                            )
-                                        } catch (_: Exception) {}
-                                    }
+                                val todayDdMmYyyy = SimpleDateFormat("dd/MM/yyyy", Locale.ENGLISH).format(Date())
+                                if (s.autoBackupEnabled &&
+                                    s.lastAutoBackupDate != todayDdMmYyyy &&
+                                    com.example.util.BackgroundScheduler.isCurrentTimeAtOrPast(s.backupScheduledTime, 20, 0)
+                                ) {
+                                    com.example.util.BackgroundScheduler.executeAutoBackupNow(getApplication(), forceRun = false)
                                 }
                             } catch (_: Exception) {}
                         }
@@ -356,15 +400,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loginClientUser(phone: String, password: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            val cleanPhone = phone.trim()
+            val cleanPhone = com.example.util.PermanentVaultHelper.normalizePhone(phone)
 
-            // 0. Check local deletion blacklist (Instant, 0ms)
-            if (com.example.util.PermanentVaultHelper.isPhoneDeleted(cleanPhone, getApplication())) {
-                onError("❌ यह ID और पासवर्ड मौजूद नहीं है। यह खाता नहीं बना है या एडमिन द्वारा हटा दिया गया है।")
-                return@launch
-            }
-
-            // 1. Instant Cloud Session Revocation Check (via ntfy)
+            // 1. Live Cloud Session Revocation Check (Dual KV: textdb.dev + textdb.online)
             val cloudRev = com.example.util.PermanentVaultHelper.checkCloudSessionRevocation(cleanPhone)
             if (cloudRev == com.example.util.CloudSessionState.DELETED) {
                 com.example.util.PermanentVaultHelper.markPhoneDeleted(cleanPhone, getApplication())
@@ -374,6 +412,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else if (cloudRev == com.example.util.CloudSessionState.BLOCKED) {
                 onError("⚠️ आपका अकाउंट एडमिन द्वारा ब्लॉक (Blocked) कर दिया गया है। सहायता के लिए एडमिन से संपर्क करें।")
                 return@launch
+            } else if (cloudRev == com.example.util.CloudSessionState.VALID) {
+                // Admin unblocked or re-created this account -> clear any stale local tombstone
+                com.example.util.PermanentVaultHelper.unmarkPhoneDeleted(cleanPhone, getApplication())
             }
 
             // 2. Live Cloud Admin Check: First check if Admin enabled Emergency Maintenance Mode
@@ -401,19 +442,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     onError("❌ यह ID और पासवर्ड मौजूद नहीं है। यह खाता नहीं बना है या एडमिन द्वारा हटा दिया गया है।")
                     return@launch
                 }
-                val existingLocal = repository.getUserByPhone(cleanPhone)
+                com.example.util.PermanentVaultHelper.unmarkPhoneDeleted(cleanPhone, getApplication())
+                val existingLocal = repository.getUserByPhone(cleanPhone) ?: repository.getUserByPhone(phone.trim())
                 if (existingLocal != null) {
                     repository.appUserDao.update(liveCloudUser.copy(id = existingLocal.id))
                 } else {
                     repository.appUserDao.insert(liveCloudUser)
                 }
+            } else if (com.example.util.PermanentVaultHelper.isPhoneDeleted(cleanPhone, getApplication())) {
+                onError("❌ यह ID और पासवर्ड मौजूद नहीं है। यह खाता नहीं बना है या एडमिन द्वारा हटा दिया गया है।")
+                return@launch
             }
 
-            var user = repository.getUserByPhone(cleanPhone) ?: liveCloudUser
+            var user = repository.getUserByPhone(cleanPhone) ?: repository.getUserByPhone(phone.trim()) ?: liveCloudUser
             // If user not in local DB (e.g. fresh install or Clear Data), check Permanent Vault!
             if (user == null) {
                 com.example.util.PermanentVaultHelper.autoRestoreOnLaunch(getApplication(), repository.database)
-                user = repository.getUserByPhone(cleanPhone)
+                user = repository.getUserByPhone(cleanPhone) ?: repository.getUserByPhone(phone.trim())
             }
 
             if (user == null || user.approvalStatus == "DELETED") {
@@ -442,12 +487,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // 6. Successful credentials & status check - Save Session
+            // 6. Successful credentials & status check - Save Session & Announce presence to Admin App
             com.example.data.security.UserSessionManager.saveSession(getApplication(), user)
+            com.example.util.PermanentVaultHelper.publishUserPresence(user)
 
-            // 6. MULTI-DEVICE DATA SYNC (Phone A -> Phone B):
-            // Automatically download and restore the user's complete shop snapshot from cloud
-            // so staff, advance salary, products, attendance, and orders appear on this new phone!
+            // 7. MULTI-DEVICE DATA SYNC (Phone A -> Phone B):
             try {
                 val res = com.example.util.PermanentVaultHelper.restoreShopSnapshot(
                     getApplication(),
@@ -731,6 +775,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 
     // ------------------------------------------------------------------------
+    // Tile Storage Locations (Settings + Global Auto-Rename)
+    // ------------------------------------------------------------------------
+    val tileLocations: StateFlow<List<com.example.data.model.TileLocation>> = repository.allTileLocations
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun addTileLocation(name: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.addTileLocation(name)
+            res.fold(
+                onSuccess = {
+                    triggerAutoVaultSave()
+                    showMessage("📍 नई लोकेशन '${name.trim()}' जोड़ी गई!")
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { onDone(true) }
+                },
+                onFailure = { err ->
+                    showMessage(err.message ?: "लोकेशन जोड़ने में त्रुटि")
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { onDone(false) }
+                }
+            )
+        }
+    }
+
+    fun renameTileLocation(id: Long, newName: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.renameTileLocation(id, newName)
+            res.fold(
+                onSuccess = { updatedCount ->
+                    triggerAutoVaultSave()
+                    val countNote = if (updatedCount > 0) " ($updatedCount टाइलों में अपने आप अपडेट हुआ!)" else ""
+                    showMessage("✅ लोकेशन नाम बदलकर '${newName.trim()}' कर दिया गया$countNote")
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { onDone(true) }
+                },
+                onFailure = { err ->
+                    showMessage(err.message ?: "नाम बदलने में त्रुटि")
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { onDone(false) }
+                }
+            )
+        }
+    }
+
+    fun deleteTileLocation(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.deleteTileLocation(id)
+            res.fold(
+                onSuccess = { cleared ->
+                    triggerAutoVaultSave()
+                    val note = if (cleared > 0) " ($cleared टाइलों से लोकेशन हटाई गई)" else ""
+                    showMessage("🗑️ लोकेशन हटा दी गई$note")
+                },
+                onFailure = { err ->
+                    showMessage(err.message ?: "लोकेशन हटाने में त्रुटि")
+                }
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------------
     // Product Operations
     // ------------------------------------------------------------------------
     fun saveProduct(
@@ -744,6 +845,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stockPieces: Int,
         defaultSellingPrice: Double,
         purchaseCost: Double,
+        location: String = "",
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -758,7 +860,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 piecesPerBox = piecesPerBox.coerceAtLeast(1),
                 stockPieces = stockPieces.coerceAtLeast(0),
                 defaultSellingPrice = defaultSellingPrice.coerceAtLeast(0.0),
-                purchaseCost = purchaseCost.coerceAtLeast(0.0)
+                purchaseCost = purchaseCost.coerceAtLeast(0.0),
+                location = location.trim()
             )
 
             val result = if (id == 0L) {
@@ -876,12 +979,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         customerAddress: String,
         status: String,
         showPriceOnPdf: Boolean,
+        showSizeTotalOnPdf: Boolean = true,
+        showDeliveryStatusOnPdf: Boolean = true,
         subtotal: Double,
         discount: Double,
         grandTotal: Double,
         paidAmount: Double = 0.0,
         notes: String,
         items: List<OrderItemEntity>,
+        isDeliveredImmediately: Boolean = true,
         onSuccess: (Long) -> Unit,
         onError: (String) -> Unit
     ) {
@@ -908,16 +1014,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 customerAddress = customerAddress.trim(),
                 status = status,
                 showPriceOnPdf = showPriceOnPdf,
+                showSizeTotalOnPdf = showSizeTotalOnPdf,
+                showDeliveryStatusOnPdf = showDeliveryStatusOnPdf,
                 subtotal = subtotal,
                 discount = discount,
                 grandTotal = grandTotal,
                 paidAmount = validPaid,
                 balanceAmount = balance,
                 paymentHistoryJson = historyJson,
-                notes = notes.trim()
+                notes = notes.trim(),
+                deliveryStatus = if (isDeliveredImmediately) "FULL_DELIVERED" else "NOT_DELIVERED"
             )
 
-            val result = repository.createOrder(order, items)
+            val result = repository.createOrder(order, items, isDeliveredImmediately = isDeliveredImmediately)
             if (result.isSuccess) {
                 val orderId = result.getOrThrow()
                 triggerAutoVaultSave()
@@ -943,11 +1052,84 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (e: Exception) {
                     android.util.Log.w("MainViewModel", "Telegram notify sale error", e)
                 }
-                showMessage(if (status == "CONFIRMED") "Sale confirmed & stock deducted!" else "Order saved as Pending!")
+                showMessage(
+                    when {
+                        status == "CONFIRMED" && !isDeliveredImmediately -> "बिल पक्का हुआ (टाइल बाद में डिलीवरी के लिए होल्ड)!"
+                        status == "CONFIRMED" -> "Sale confirmed & stock deducted!"
+                        else -> "Order saved as Pending!"
+                    }
+                )
                 onSuccess(orderId)
             } else {
                 onError(result.exceptionOrNull()?.message ?: "Failed to create order")
             }
+        }
+    }
+
+    fun recordPartialDelivery(
+        orderId: Long,
+        entries: List<Triple<Long, Int, Int>>,
+        receiverName: String,
+        notes: String,
+        deliveredAt: Long = System.currentTimeMillis(),
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.recordPartialDelivery(orderId, entries, receiverName, notes, deliveredAt)
+            res.fold(
+                onSuccess = { newStatus ->
+                    triggerAutoVaultSave()
+                    val msg = if (newStatus == "FULL_DELIVERED") {
+                        "✅ सभी टाइल्स की पूरी डिलीवरी दर्ज हो गई!"
+                    } else {
+                        "🚚 आंशिक टाइल डिलीवरी तारीख व समय के साथ दर्ज हुई!"
+                    }
+                    showMessage(msg)
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { onSuccess() }
+                },
+                onFailure = { err ->
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        onError(err.message ?: "डिलीवरी दर्ज करने में त्रुटि")
+                    }
+                }
+            )
+        }
+    }
+
+    fun markAllRemainingDelivered(
+        orderId: Long,
+        receiverName: String,
+        notes: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.markAllRemainingDelivered(orderId, receiverName, notes)
+            res.fold(
+                onSuccess = {
+                    triggerAutoVaultSave()
+                    showMessage("✅ सभी बाकी टाइल्स डिलीवर कर दी गईं!")
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { onSuccess() }
+                },
+                onFailure = { err ->
+                    showMessage(err.message ?: "त्रुटि")
+                }
+            )
+        }
+    }
+
+    fun deleteDeliveryLogEntry(logId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.deleteDeliveryLogEntry(logId)
+            res.fold(
+                onSuccess = {
+                    triggerAutoVaultSave()
+                    showMessage("↩️ डिलीवरी एंट्री वापस ली गई (बाकी मात्रा अपडेट हुई)")
+                },
+                onFailure = { err ->
+                    showMessage(err.message ?: "एंट्री हटाने में त्रुटि")
+                }
+            )
         }
     }
 
@@ -1004,6 +1186,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val err = res.exceptionOrNull()?.message ?: "टाइल वापसी असफल रही"
                 onError(err)
             }
+        }
+    }
+
+    fun getReturnExchangeLogsForOrder(orderId: Long) = repository.getReturnExchangeLogsForOrder(orderId)
+
+    fun processReturnOrExchange(
+        orderId: Long,
+        orderItemId: Long,
+        returnBoxes: Int,
+        returnLoose: Int,
+        outcomeType: String,
+        replacementProductId: Long? = null,
+        replacementCustomName: String = "",
+        replacementCustomSize: String = "",
+        replacementBoxes: Int = 0,
+        replacementLoose: Int = 0,
+        replacementRatePerBox: Double = 0.0,
+        replacementCustomTotal: Double = 0.0,
+        replacementDeliveryStatus: String = "TAKEN",
+        notes: String = "",
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = repository.processReturnOrExchange(
+                orderId = orderId,
+                orderItemId = orderItemId,
+                returnBoxes = returnBoxes,
+                returnLoose = returnLoose,
+                outcomeType = outcomeType,
+                replacementProductId = replacementProductId,
+                replacementCustomName = replacementCustomName,
+                replacementCustomSize = replacementCustomSize,
+                replacementBoxes = replacementBoxes,
+                replacementLoose = replacementLoose,
+                replacementRatePerBox = replacementRatePerBox,
+                replacementCustomTotal = replacementCustomTotal,
+                replacementDeliveryStatus = replacementDeliveryStatus,
+                notes = notes
+            )
+            res.fold(
+                onSuccess = { msg ->
+                    triggerAutoVaultSave()
+                    showMessage(msg)
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { onSuccess() }
+                },
+                onFailure = { err ->
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        onError(err.message ?: "वापसी/बदली दर्ज करने में त्रुटि")
+                    }
+                }
+            )
         }
     }
 
@@ -1078,7 +1312,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleShowPriceOnPdf(orderId: Long, showPrice: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.updatePdfPriceVisibility(orderId, showPrice)
-            showMessage(if (showPrice) "Prices will appear on PDF" else "Prices will be hidden on PDF (Quantity Slip)")
+            showMessage(if (showPrice) "PDF पर कीमत दिखेगी" else "PDF पर कीमत छुपी रहेगी (Quantity Slip)")
+        }
+    }
+
+    fun toggleShowSizeTotalOnPdf(orderId: Long, showSizeTotal: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updatePdfSizeTotalVisibility(orderId, showSizeTotal)
+            showMessage(if (showSizeTotal) "PDF पर साइज़-वार कुल पेटी दिखेगी" else "PDF पर साइज़-वार कुल पेटी छुपी रहेगी")
+        }
+    }
+
+    fun toggleShowDeliveryStatusOnPdf(orderId: Long, showDelivery: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updatePdfDeliveryStatusVisibility(orderId, showDelivery)
+            showMessage(if (showDelivery) "PDF पर ले गए / बाकी बची टाइल दिखेगी" else "PDF पर डिलीवरी स्टेटस छुपा रहेगा")
         }
     }
 
@@ -1099,7 +1347,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val settings = repository.getSettingsSync() ?: ShopSettings()
-                val pdfFile = PdfGenerator.generateOrderPdf(context, orderWithItems, settings)
+                val deliveryLogs = repository.getDeliveriesForOrderSync(orderId)
+                val pdfFile = PdfGenerator.generateOrderPdf(context, orderWithItems, settings, deliveryLogs)
                 onGenerated(pdfFile)
             } catch (e: Exception) {
                 onError("Failed to generate PDF: ${e.localizedMessage}")
@@ -1149,7 +1398,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autoBackupEnabled: Boolean = false,
         backupTargetEmail: String = "",
         backupScheduledTime: String = "20:00",
-        backupFromDateString: String = ""
+        backupFromDateString: String = "",
+        backupFolderUri: String? = null,
+        backupFolderName: String? = null,
+        driveWebhookUrl: String? = null,
+        autoAttendanceTime: String? = null
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             val currentSettings = repository.getCurrentShopSettings()
@@ -1186,14 +1439,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 notifyStaffAttendance = notifyStaffAttendance,
                 notifyDailySummary = notifyDailySummary,
                 autoAttendanceEnabled = currentSettings.autoAttendanceEnabled,
+                autoAttendanceTime = (autoAttendanceTime ?: currentSettings.autoAttendanceTime).trim().ifBlank { "09:00" },
+                lastAutoAttendanceDate = currentSettings.lastAutoAttendanceDate,
                 autoBackupEnabled = autoBackupEnabled,
                 backupTargetEmail = backupTargetEmail.trim(),
                 backupScheduledTime = backupScheduledTime.trim().ifBlank { "20:00" },
                 backupFromDateString = backupFromDateString.trim(),
-                lastAutoBackupDate = currentSettings.lastAutoBackupDate,
+                lastAutoBackupDate = if (backupScheduledTime.trim() != currentSettings.backupScheduledTime.trim()) "" else currentSettings.lastAutoBackupDate,
+                backupFolderUri = (backupFolderUri ?: currentSettings.backupFolderUri).trim(),
+                backupFolderName = com.example.util.BackgroundScheduler.sanitizeFolderName(
+                    backupFolderName ?: currentSettings.backupFolderName
+                ),
+                driveWebhookUrl = (driveWebhookUrl ?: currentSettings.driveWebhookUrl).trim(),
                 pdfSizeDisplayConfigJson = currentSettings.pdfSizeDisplayConfigJson
             )
             repository.saveSettings(s)
+            com.example.util.BackgroundScheduler.syncAllSchedules(getApplication(), s)
 
             // Bi-directional sync with AppUser so that user app settings update the registered user
             val sessionUser = com.example.data.security.UserSessionManager.getCurrentUser(getApplication())
@@ -1211,7 +1472,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             triggerAutoVaultSave()
-            showMessage("दुकान व सेटिंग्स सुरक्षित हो गईं!")
+            showMessage("दुकान व ऑटो-बैकअप सेटिंग्स सुरक्षित हो गईं!")
+        }
+    }
+
+    fun saveAutoBackupSettingsOnly(
+        autoBackupEnabled: Boolean,
+        backupScheduledTime: String,
+        backupFromDateString: String,
+        backupTargetEmail: String,
+        backupFolderUri: String,
+        backupFolderName: String,
+        driveWebhookUrl: String
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val current = repository.getCurrentShopSettings()
+            val cleanTime = backupScheduledTime.trim().ifBlank { "20:00" }
+            val timeChanged = cleanTime != current.backupScheduledTime.trim()
+            val updated = current.copy(
+                autoBackupEnabled = autoBackupEnabled,
+                backupScheduledTime = cleanTime,
+                backupFromDateString = backupFromDateString.trim(),
+                backupTargetEmail = backupTargetEmail.trim(),
+                backupFolderUri = backupFolderUri.trim(),
+                backupFolderName = com.example.util.BackgroundScheduler.sanitizeFolderName(backupFolderName),
+                driveWebhookUrl = driveWebhookUrl.trim(),
+                lastAutoBackupDate = if (timeChanged) "" else current.lastAutoBackupDate
+            )
+            repository.saveSettings(updated)
+            com.example.util.BackgroundScheduler.syncAllSchedules(getApplication(), updated)
+            triggerAutoVaultSave()
+            showMessage(
+                if (updated.autoBackupEnabled) {
+                    "✔ ऑटो-बैकअप रोज़ ${updated.backupScheduledTime} पर सेट हो गया (ऐप बंद हो तब भी चलेगा)!"
+                } else {
+                    "ऑटो-बैकअप बंद कर दिया गया"
+                }
+            )
+        }
+    }
+
+    fun runAutoBackupToFolderAndDriveNow(onDone: (com.example.util.AutoBackupRunResult) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = com.example.util.BackgroundScheduler.executeAutoBackupNow(
+                context = getApplication(),
+                forceRun = true,
+                sourceLabel = "MANUAL_TEST"
+            )
+            if (res.success) {
+                val extra = if (res.driveUploadMessage.isNotBlank()) " | ${res.driveUploadMessage}" else ""
+                showMessage("✔ टेस्ट बैकअप सफल: ${res.mobileFolderMessage}$extra")
+            } else {
+                showMessage("⚠️ बैकअप त्रुटि: ${res.errorMessage ?: "कृपया पुनः प्रयास करें"}")
+            }
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                onDone(res)
+            }
+        }
+    }
+
+    fun scheduleOneMinuteAutoBackupTest(onScheduled: (Long) -> Unit = {}) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val triggerAt = com.example.util.BackgroundScheduler.scheduleOneMinuteTestBackup(getApplication())
+            val timeStr = SimpleDateFormat("hh:mm:ss a", Locale.ENGLISH).format(Date(triggerAt))
+            showMessage("⏱️ 1 मिनट टेस्ट अलार्म सेट ($timeStr) — अब ऐप बंद करके जांचें!")
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                onScheduled(triggerAt)
+            }
         }
     }
 
@@ -1227,6 +1554,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveShopSettings(settings: ShopSettings) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.saveSettings(settings)
+            com.example.util.BackgroundScheduler.syncAllSchedules(getApplication(), settings)
             triggerAutoVaultSave()
         }
     }
@@ -1478,30 +1806,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // ------------------------------------------------------------------------
-    // Auto Attendance Today
+    // Auto Attendance Today (Fixed yyyy-MM-dd format + Background Schedule)
     // ------------------------------------------------------------------------
     fun runAutoAttendanceToday() {
         viewModelScope.launch(Dispatchers.IO) {
             val settings = repository.getCurrentShopSettings()
             if (settings.autoAttendanceEnabled) {
-                val todayStr = SimpleDateFormat("dd/MM/yyyy", Locale.ENGLISH).format(Date())
-                val count = repository.autoMarkPresentForDate(todayStr)
+                val count = com.example.util.BackgroundScheduler.executeAutoAttendanceNow(getApplication(), forceRun = true)
                 if (count > 0) {
                     triggerAutoVaultSave()
-                    showMessage("⚡ $count कर्मचारियों की आज की ऑटो-हाजिरी दर्ज हो गई!")
+                    showMessage("⚡ $count कर्मचारियों की आज की ऑटो-हाजिरी (PRESENT) दर्ज हो गई!")
+                } else {
+                    showMessage("✔ आज की सभी सक्रिय कर्मचारियों की हाजिरी पहले से दर्ज है")
                 }
             }
         }
     }
 
     // ------------------------------------------------------------------------
-    // Cumulative Daily Backup & Share to Email / Google Drive
+    // Cumulative Daily Backup & Share to Email / Google Drive + Custom Mobile Folder
     // ------------------------------------------------------------------------
     fun triggerCumulativeBackupAndShare(
         context: Context,
         customFromDateString: String? = null,
         onFileReady: (File, android.content.Intent) -> Unit = { _, shareIntent ->
-            val chooser = android.content.Intent.createChooser(shareIntent, "Save or Share Backup")
+            val chooser = android.content.Intent.createChooser(shareIntent, "Google Drive / Email पर बैकअप भेजें")
             chooser.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(chooser)
         }
@@ -1515,12 +1844,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     repository.database,
                     fromDate
                 )
+                val folderSummary = com.example.util.BackgroundScheduler.saveBackupToCustomMobileFolder(
+                    context = context,
+                    backupFile = file,
+                    safTreeUriString = settings.backupFolderUri,
+                    customFolderName = settings.backupFolderName
+                )
                 val shareIntent = BackupRestoreHelper.createShareBackupIntent(
                     context,
                     file,
                     settings.backupTargetEmail
                 )
-                showMessage("बैकअप तैयार: ${file.name}")
+                showMessage("बैकअप तैयार ($folderSummary): ${file.name}")
                 onFileReady(file, shareIntent)
             } catch (e: Exception) {
                 showMessage("बैकअप विफल: ${e.localizedMessage}")

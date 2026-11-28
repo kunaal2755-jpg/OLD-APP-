@@ -41,12 +41,17 @@ data class ShopSettings(
     val notifyDailySummary: Boolean = true,
     // Auto Attendance
     val autoAttendanceEnabled: Boolean = false,
+    val autoAttendanceTime: String = "09:00",
+    val lastAutoAttendanceDate: String = "",
     // Cumulative Daily Evening Backup & Drive/Email Upload
     val autoBackupEnabled: Boolean = true,
     val backupTargetEmail: String = "",
     val backupScheduledTime: String = "20:00", // 8:00 PM default
     val backupFromDateString: String = "", // e.g. "01/11/2026"
     val lastAutoBackupDate: String = "",
+    val backupFolderUri: String = "", // SAF tree URI chosen by user for any custom mobile folder
+    val backupFolderName: String = "TilesAndMarbles_Backups", // Custom folder inside Downloads/
+    val driveWebhookUrl: String = "", // Optional Google Apps Script Web App URL for unattended Google Drive + Email upload
     // Custom PDF Tile Size Display Configuration (JSON)
     val pdfSizeDisplayConfigJson: String = ""
 )
@@ -57,6 +62,16 @@ data class SizePricing(
     val sizeName: String, // e.g. "12x18", "2x4", "2x2", "16x16"
     val defaultPricePerBox: Double,
     val defaultPiecesPerBox: Int = 0
+)
+
+@Entity(
+    tableName = "tile_locations",
+    indices = [Index(value = ["name"], unique = true)]
+)
+data class TileLocation(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String, // e.g. "दुकान (Shop)", "गोदाम (Godown)", "वेयरहाउस (Warehouse)"
+    val createdAt: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "tile_products")
@@ -71,7 +86,8 @@ data class TileProduct(
     val stockPieces: Int = 0, // stored in pieces as base unit
     val defaultSellingPrice: Double = 0.0, // default price per box
     val purchaseCost: Double = 0.0, // cost price per box for internal profit
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val location: String = "" // Tile storage location from Settings (Godown, Warehouse, Dukaan, etc.)
 ) {
     val fullBoxes: Int get() = if (piecesPerBox > 0) stockPieces / piecesPerBox else 0
     val loosePieces: Int get() = if (piecesPerBox > 0) stockPieces % piecesPerBox else 0
@@ -101,6 +117,8 @@ data class OrderEntity(
     val customerAddress: String = "",
     val status: String = "PENDING", // "PENDING" or "CONFIRMED"
     val showPriceOnPdf: Boolean = true, // Per-order PDF Price Visibility Switch
+    val showSizeTotalOnPdf: Boolean = true, // Per-order PDF Size-wise Box Total Switch
+    val showDeliveryStatusOnPdf: Boolean = true, // Per-order PDF Delivery (Taken/Pending) Switch
     val subtotal: Double = 0.0,
     val discount: Double = 0.0,
     val grandTotal: Double = 0.0,
@@ -109,7 +127,8 @@ data class OrderEntity(
     val paymentHistoryJson: String = "", // JSON list of partial installments
     val notes: String = "",
     val createdAt: Long = System.currentTimeMillis(),
-    val confirmedAt: Long? = null
+    val confirmedAt: Long? = null,
+    val deliveryStatus: String = "FULL_DELIVERED" // "FULL_DELIVERED", "PARTIAL_PENDING", "NOT_DELIVERED"
 )
 
 @Entity(tableName = "order_items")
@@ -125,11 +144,68 @@ data class OrderItemEntity(
     val fullBoxes: Int,
     val loosePieces: Int = 0,
     val pricePerBox: Double,
-    val lineTotal: Double
+    val lineTotal: Double,
+    val deliveredBoxes: Int = 0,
+    val deliveredPieces: Int = 0,
+    val itemType: String = "TILE", // "TILE", "MARBLE", "MANUAL"
+    val marbleLength: Double = 0.0,
+    val marbleWidth: Double = 0.0,
+    val marbleUnit: String = "INCH", // "INCH" or "FEET"
+    val marblePieces: Int = 0,
+    val marbleTotalSqFt: Double = 0.0,
+    val marbleRatePerSqFt: Double = 0.0
 ) {
+    val isMarble: Boolean get() = itemType == "MARBLE"
     // Total pieces calculated internally for inventory adjustments
     val totalPieces: Int get() = (fullBoxes * piecesPerBox) + loosePieces
+    val deliveredTotalPieces: Int get() = ((deliveredBoxes * piecesPerBox.coerceAtLeast(1)) + deliveredPieces).coerceIn(0, totalPieces)
+    val pendingTotalPieces: Int get() = (totalPieces - deliveredTotalPieces).coerceAtLeast(0)
+    val pendingFullBoxes: Int get() = if (piecesPerBox > 0) pendingTotalPieces / piecesPerBox else 0
+    val pendingLoosePieces: Int get() = if (piecesPerBox > 0) pendingTotalPieces % piecesPerBox else 0
+    val isFullyDelivered: Boolean get() = pendingTotalPieces <= 0
 }
+
+@Entity(tableName = "order_deliveries")
+data class OrderDeliveryLog(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val orderId: Long,
+    val orderItemId: Long,
+    val tileCode: String,
+    val tileName: String,
+    val tileSize: String,
+    val piecesPerBox: Int,
+    val boxesDelivered: Int,
+    val piecesDelivered: Int = 0,
+    val deliveredAt: Long = System.currentTimeMillis(),
+    val receiverName: String = "",
+    val notes: String = ""
+) {
+    val totalPiecesDelivered: Int get() = (boxesDelivered * piecesPerBox.coerceAtLeast(1)) + piecesDelivered
+}
+
+@Entity(tableName = "order_return_exchanges")
+data class OrderReturnExchangeLog(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val orderId: Long,
+    val returnedItemId: Long = 0,
+    val returnedTileCode: String = "",
+    val returnedTileName: String = "",
+    val returnedTileSize: String = "",
+    val returnedBoxes: Int = 0,
+    val returnedPieces: Int = 0,
+    val returnedAmount: Double = 0.0,
+    val outcomeType: String = "REFUND_BALANCE", // "REFUND_CASH", "REFUND_BALANCE", "EXCHANGE_TILE", "EXCHANGE_OTHER"
+    val replacementItemName: String = "",
+    val replacementTileCode: String = "",
+    val replacementTileSize: String = "",
+    val replacementBoxes: Int = 0,
+    val replacementPieces: Int = 0,
+    val replacementAmount: Double = 0.0,
+    val replacementDeliveryStatus: String = "NONE", // "TAKEN", "HOLD", "NONE"
+    val netAmountDifference: Double = 0.0, // >0 customer pays extra, <0 refund/credit
+    val notes: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
 
 @Entity(tableName = "stock_movements")
 data class StockMovement(

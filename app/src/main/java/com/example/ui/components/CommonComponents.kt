@@ -201,6 +201,142 @@ fun PdfPriceVisibilitySwitchCard(
 }
 
 @Composable
+fun PdfDisplaySwitchesCard(
+    showPrice: Boolean,
+    onTogglePrice: (Boolean) -> Unit,
+    showSizeTotal: Boolean,
+    onToggleSizeTotal: (Boolean) -> Unit,
+    showDeliveryStatus: Boolean,
+    onToggleDeliveryStatus: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(Color(0xFFBFDBFE))
+        ),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(
+                text = "📄 PDF डिस्प्ले स्विच (Customer PDF Options)",
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                color = Navy900
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // 1. Price Switch
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "💰 कीमत दिखाएं (Show Prices on PDF)",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = Navy900
+                    )
+                    Text(
+                        text = if (showPrice) "ON: रेट, कुल राशि व बकाया PDF पर दिखेगा"
+                        else "OFF: केवल मात्रा पर्ची (कीमत छुपी रहेगी)",
+                        fontSize = 11.sp,
+                        color = if (showPrice) Color(0xFF1D4ED8) else Color(0xFF64748B)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = showPrice,
+                    onCheckedChange = onTogglePrice,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PureWhite,
+                        checkedTrackColor = Color(0xFF2563EB)
+                    ),
+                    modifier = Modifier.testTag("pdf_price_switch")
+                )
+            }
+
+            androidx.compose.material3.HorizontalDivider(color = Color(0xFFE2E8F0), modifier = Modifier.padding(vertical = 2.dp))
+
+            // 2. Size-wise Box Total Switch
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "📦 साइज़-वार कुल पेटी (Size-wise Box Total)",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = Navy900
+                    )
+                    Text(
+                        text = if (showSizeTotal) "ON: 12x18, 2x4 आदि की सभी डिज़ाइन जोड़कर कुल पेटी दिखेगी"
+                        else "OFF: साइज़-वार कुल पेटी सारांश छुपा रहेगा",
+                        fontSize = 11.sp,
+                        color = if (showSizeTotal) Color(0xFF047857) else Color(0xFF64748B)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = showSizeTotal,
+                    onCheckedChange = onToggleSizeTotal,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PureWhite,
+                        checkedTrackColor = Color(0xFF059669)
+                    ),
+                    modifier = Modifier.testTag("pdf_size_total_switch")
+                )
+            }
+
+            androidx.compose.material3.HorizontalDivider(color = Color(0xFFE2E8F0), modifier = Modifier.padding(vertical = 2.dp))
+
+            // 3. Delivery Status (Taken vs Pending) Switch
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "🚚 ले गए / बाकी बची दिखाएं (Delivery Status)",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        color = Navy900
+                    )
+                    Text(
+                        text = if (showDeliveryStatus) "ON: कितनी पेटी ले गए व कितनी बाकी बची PDF पर दिखेगी"
+                        else "OFF: ले गए / बाकी बची विवरण PDF पर नहीं दिखेगा",
+                        fontSize = 11.sp,
+                        color = if (showDeliveryStatus) Color(0xFFD97706) else Color(0xFF64748B)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = showDeliveryStatus,
+                    onCheckedChange = onToggleDeliveryStatus,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PureWhite,
+                        checkedTrackColor = Color(0xFFD97706)
+                    ),
+                    modifier = Modifier.testTag("pdf_delivery_status_switch")
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun ConfirmDeleteOrderDialog(
     isConfirmed: Boolean,
     onDismiss: () -> Unit,

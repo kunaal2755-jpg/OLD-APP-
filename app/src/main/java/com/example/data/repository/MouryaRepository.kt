@@ -28,10 +28,13 @@ class MouryaRepository(val database: AppDatabase) {
 
     private val settingsDao = database.shopSettingsDao()
     private val sizePricingDao = database.sizePricingDao()
+    private val tileLocationDao = database.tileLocationDao()
     private val productDao = database.tileProductDao()
     private val customerDao = database.customerDao()
     private val orderDao = database.orderDao()
     private val orderItemDao = database.orderItemDao()
+    private val orderDeliveryDao = database.orderDeliveryDao()
+    private val orderReturnExchangeDao = database.orderReturnExchangeDao()
     private val stockMovementDao = database.stockMovementDao()
     private val clientLicenseDao = database.clientLicenseDao()
     val appUserDao = database.appUserDao()
@@ -41,10 +44,10 @@ class MouryaRepository(val database: AppDatabase) {
 
     val adminGlobalConfig: Flow<com.example.data.model.AdminGlobalConfig?> = adminGlobalConfigDao.getConfig()
 
-    suspend fun saveAdminGlobalConfig(context: Context, config: com.example.data.model.AdminGlobalConfig) {
+    suspend fun saveAdminGlobalConfig(context: Context, config: com.example.data.model.AdminGlobalConfig): Boolean {
         adminGlobalConfigDao.saveConfig(config)
         com.example.util.PermanentVaultHelper.saveAdminConfig(context, config)
-        com.example.util.PermanentVaultHelper.publishCloudAdminConfig(config)
+        return com.example.util.PermanentVaultHelper.publishCloudAdminConfig(config)
     }
 
     val stockMovements: Flow<List<com.example.data.model.StockMovement>> = stockMovementDao.getRecentMovements()
@@ -108,6 +111,65 @@ class MouryaRepository(val database: AppDatabase) {
             count++
         }
         return count
+    }
+
+    // ------------------------------------------------------------------------
+    // Tile Storage Locations (Settings -> Auto-Sync Rename Across All Tiles)
+    // ------------------------------------------------------------------------
+    val allTileLocations: Flow<List<com.example.data.model.TileLocation>> = tileLocationDao.getAllLocations()
+
+    suspend fun ensureDefaultLocationsExist() {
+        if (tileLocationDao.getAllLocationsSync().isEmpty()) {
+            tileLocationDao.insert(com.example.data.model.TileLocation(name = "दुकान (Shop)"))
+            tileLocationDao.insert(com.example.data.model.TileLocation(name = "गोदाम (Godown)"))
+            tileLocationDao.insert(com.example.data.model.TileLocation(name = "वेयरहाउस (Warehouse)"))
+        }
+    }
+
+    suspend fun addTileLocation(name: String): Result<Long> {
+        val clean = name.trim()
+        if (clean.isBlank()) return Result.failure(IllegalArgumentException("लोकेशन का नाम खाली नहीं हो सकता!"))
+        val existing = tileLocationDao.getByName(clean)
+        if (existing != null) {
+            return Result.failure(IllegalArgumentException("'$clean' लोकेशन पहले से मौजूद है!"))
+        }
+        val id = tileLocationDao.insert(com.example.data.model.TileLocation(name = clean))
+        return Result.success(id)
+    }
+
+    suspend fun renameTileLocation(id: Long, newName: String): Result<Int> {
+        val cleanNew = newName.trim()
+        if (cleanNew.isBlank()) return Result.failure(IllegalArgumentException("नया नाम खाली नहीं हो सकता!"))
+        return try {
+            database.withTransaction {
+                val existing = tileLocationDao.getById(id)
+                    ?: return@withTransaction Result.failure(IllegalStateException("लोकेशन नहीं मिली!"))
+                val duplicate = tileLocationDao.getByName(cleanNew)
+                if (duplicate != null && duplicate.id != id) {
+                    return@withTransaction Result.failure(IllegalArgumentException("'$cleanNew' नाम की लोकेशन पहले से मौजूद है!"))
+                }
+                val oldName = existing.name
+                tileLocationDao.update(existing.copy(name = cleanNew))
+                val updatedTilesCount = productDao.renameLocationAcrossProducts(oldName, cleanNew)
+                Result.success(updatedTilesCount)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteTileLocation(id: Long): Result<Int> {
+        return try {
+            database.withTransaction {
+                val existing = tileLocationDao.getById(id)
+                    ?: return@withTransaction Result.failure(IllegalStateException("लोकेशन नहीं मिली!"))
+                tileLocationDao.deleteById(id)
+                val clearedCount = productDao.clearLocationAcrossProducts(existing.name)
+                Result.success(clearedCount)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -233,15 +295,17 @@ class MouryaRepository(val database: AppDatabase) {
 
     suspend fun createOrder(
         order: OrderEntity,
-        items: List<OrderItemEntity>
+        items: List<OrderItemEntity>,
+        isDeliveredImmediately: Boolean = true
     ): Result<Long> {
         return try {
             database.withTransaction {
                 val isConfirmed = order.status == "CONFIRMED"
 
                 if (isConfirmed) {
-                    // Check stock for all items
+                    // Check stock only for real inventory tiles (skip manual & marble items with productId <= 0)
                     for (item in items) {
+                        if (item.productId <= 0L || item.itemType != "TILE") continue
                         val product = productDao.getProductById(item.productId)
                             ?: return@withTransaction Result.failure(
                                 IllegalStateException("Product '${item.tileName}' not found.")
@@ -256,25 +320,210 @@ class MouryaRepository(val database: AppDatabase) {
                         }
                     }
 
-                    // Deduct stock
+                    // Deduct stock for real inventory tiles
                     for (item in items) {
-                        val product = productDao.getProductById(item.productId)!!
+                        if (item.productId <= 0L || item.itemType != "TILE") continue
+                        val product = productDao.getProductById(item.productId) ?: continue
                         val newStock = product.stockPieces - item.totalPieces
                         productDao.updateStock(product.id, newStock)
                     }
                 }
 
-                val orderToSave = if (isConfirmed) {
-                    order.copy(confirmedAt = System.currentTimeMillis())
-                } else {
-                    order
-                }
+                val now = System.currentTimeMillis()
+                val deliveryStatus = if (isDeliveredImmediately) "FULL_DELIVERED" else "NOT_DELIVERED"
+                val orderToSave = order.copy(
+                    confirmedAt = if (isConfirmed) now else order.confirmedAt,
+                    deliveryStatus = deliveryStatus
+                )
 
                 val orderId = orderDao.insert(orderToSave)
-                val itemsWithOrderId = items.map { it.copy(orderId = orderId) }
+                val itemsWithOrderId = items.map { item ->
+                    item.copy(
+                        orderId = orderId,
+                        deliveredBoxes = if (isDeliveredImmediately) item.fullBoxes else 0,
+                        deliveredPieces = if (isDeliveredImmediately) item.loosePieces else 0
+                    )
+                }
                 orderItemDao.insertAll(itemsWithOrderId)
 
+                if (isDeliveredImmediately) {
+                    val insertedItems = orderItemDao.getItemsForOrderSync(orderId)
+                    val initialLogs = insertedItems.map { item ->
+                        com.example.data.model.OrderDeliveryLog(
+                            orderId = orderId,
+                            orderItemId = item.id,
+                            tileCode = item.tileCode,
+                            tileName = item.tileName,
+                            tileSize = item.tileSize,
+                            piecesPerBox = item.piecesPerBox,
+                            boxesDelivered = item.fullBoxes,
+                            piecesDelivered = item.loosePieces,
+                            deliveredAt = now,
+                            receiverName = order.customerName,
+                            notes = "बिल बनाते समय पूरी डिलीवरी (Full Delivery at Billing)"
+                        )
+                    }
+                    if (initialLogs.isNotEmpty()) {
+                        orderDeliveryDao.insertAll(initialLogs)
+                    }
+                }
+
                 Result.success(orderId)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Partial / Staged Tile Delivery Tracking (Booking -> Pickup Over Time)
+    // ------------------------------------------------------------------------
+    fun getDeliveriesForOrder(orderId: Long): Flow<List<com.example.data.model.OrderDeliveryLog>> =
+        orderDeliveryDao.getDeliveriesForOrder(orderId)
+
+    suspend fun getDeliveriesForOrderSync(orderId: Long): List<com.example.data.model.OrderDeliveryLog> =
+        orderDeliveryDao.getDeliveriesForOrderSync(orderId)
+
+    fun getReturnExchangeLogsForOrder(orderId: Long): Flow<List<com.example.data.model.OrderReturnExchangeLog>> =
+        orderReturnExchangeDao.getForOrder(orderId)
+
+    suspend fun getReturnExchangeLogsForOrderSync(orderId: Long): List<com.example.data.model.OrderReturnExchangeLog> =
+        orderReturnExchangeDao.getForOrderSync(orderId)
+
+    private suspend fun recomputeOrderDeliveryStatus(orderId: Long): String {
+        val items = orderItemDao.getItemsForOrderSync(orderId)
+        val newStatus = when {
+            items.isEmpty() -> "FULL_DELIVERED"
+            items.all { it.isFullyDelivered } -> "FULL_DELIVERED"
+            items.all { it.deliveredTotalPieces <= 0 } -> "NOT_DELIVERED"
+            else -> "PARTIAL_PENDING"
+        }
+        orderDao.updateDeliveryStatus(orderId, newStatus)
+        return newStatus
+    }
+
+    /**
+     * Records a new staged pickup for one or more tile items in an order.
+     * entries = List of Triple(orderItemId, boxesTakenNow, loosePiecesTakenNow)
+     */
+    suspend fun recordPartialDelivery(
+        orderId: Long,
+        entries: List<Triple<Long, Int, Int>>,
+        receiverName: String,
+        notes: String,
+        deliveredAt: Long = System.currentTimeMillis()
+    ): Result<String> {
+        return try {
+            database.withTransaction {
+                val validEntries = entries.filter { (_, b, p) -> b > 0 || p > 0 }
+                if (validEntries.isEmpty()) {
+                    return@withTransaction Result.failure(IllegalArgumentException("कृपया कम से कम 1 बॉक्स या पीस की मात्रा दर्ज करें!"))
+                }
+
+                for ((itemId, addBoxes, addPcs) in validEntries) {
+                    val item = orderItemDao.getItemById(itemId)
+                        ?: return@withTransaction Result.failure(IllegalStateException("ऑर्डर आइटम नहीं मिला!"))
+                    val ppb = item.piecesPerBox.coerceAtLeast(1)
+                    val addTotal = (addBoxes * ppb) + addPcs
+                    if (addTotal <= 0) continue
+                    if (addTotal > item.pendingTotalPieces) {
+                        return@withTransaction Result.failure(
+                            IllegalArgumentException("${item.tileName}: बाकी बची मात्रा (${item.pendingFullBoxes} Bx + ${item.pendingLoosePieces} Pcs) से अधिक डिलीवरी दर्ज नहीं की जा सकती!")
+                        )
+                    }
+
+                    val newDeliveredTotal = item.deliveredTotalPieces + addTotal
+                    val newDelBoxes = newDeliveredTotal / ppb
+                    val newDelLoose = newDeliveredTotal % ppb
+                    orderItemDao.updateDeliveredQty(item.id, newDelBoxes, newDelLoose)
+
+                    orderDeliveryDao.insert(
+                        com.example.data.model.OrderDeliveryLog(
+                            orderId = orderId,
+                            orderItemId = item.id,
+                            tileCode = item.tileCode,
+                            tileName = item.tileName,
+                            tileSize = item.tileSize,
+                            piecesPerBox = ppb,
+                            boxesDelivered = addTotal / ppb,
+                            piecesDelivered = addTotal % ppb,
+                            deliveredAt = deliveredAt,
+                            receiverName = receiverName.trim(),
+                            notes = notes.trim()
+                        )
+                    )
+                }
+
+                val status = recomputeOrderDeliveryStatus(orderId)
+                Result.success(status)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun markAllRemainingDelivered(
+        orderId: Long,
+        receiverName: String,
+        notes: String
+    ): Result<String> {
+        return try {
+            database.withTransaction {
+                val items = orderItemDao.getItemsForOrderSync(orderId)
+                val pendingEntries = items
+                    .filter { !it.isFullyDelivered }
+                    .map { Triple(it.id, it.pendingFullBoxes, it.pendingLoosePieces) }
+                if (pendingEntries.isEmpty()) {
+                    return@withTransaction Result.failure(IllegalStateException("सभी टाइल्स की डिलीवरी पहले ही पूरी हो चुकी है!"))
+                }
+                val now = System.currentTimeMillis()
+                for (item in items) {
+                    if (item.isFullyDelivered) continue
+                    val ppb = item.piecesPerBox.coerceAtLeast(1)
+                    val remBoxes = item.pendingFullBoxes
+                    val remLoose = item.pendingLoosePieces
+                    orderItemDao.updateDeliveredQty(item.id, item.fullBoxes, item.loosePieces)
+                    orderDeliveryDao.insert(
+                        com.example.data.model.OrderDeliveryLog(
+                            orderId = orderId,
+                            orderItemId = item.id,
+                            tileCode = item.tileCode,
+                            tileName = item.tileName,
+                            tileSize = item.tileSize,
+                            piecesPerBox = ppb,
+                            boxesDelivered = remBoxes,
+                            piecesDelivered = remLoose,
+                            deliveredAt = now,
+                            receiverName = receiverName.trim(),
+                            notes = notes.trim().ifBlank { "शेष सभी टाइल्स की पूरी डिलीवरी" }
+                        )
+                    )
+                }
+                val status = recomputeOrderDeliveryStatus(orderId)
+                Result.success(status)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteDeliveryLogEntry(logId: Long): Result<Unit> {
+        return try {
+            database.withTransaction {
+                val log = orderDeliveryDao.getById(logId)
+                    ?: return@withTransaction Result.failure(IllegalStateException("डिलीवरी रिकॉर्ड नहीं मिला!"))
+                val items = orderItemDao.getItemsForOrderSync(log.orderId)
+                val targetItem = items.find { it.id == log.orderItemId }
+                    ?: items.find { it.tileCode.equals(log.tileCode, ignoreCase = true) }
+
+                if (targetItem != null) {
+                    val ppb = targetItem.piecesPerBox.coerceAtLeast(1)
+                    val rollbackTotal = (targetItem.deliveredTotalPieces - log.totalPiecesDelivered).coerceAtLeast(0)
+                    orderItemDao.updateDeliveredQty(targetItem.id, rollbackTotal / ppb, rollbackTotal % ppb)
+                }
+                orderDeliveryDao.deleteById(logId)
+                recomputeOrderDeliveryStatus(log.orderId)
+                Result.success(Unit)
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -292,8 +541,9 @@ class MouryaRepository(val database: AppDatabase) {
 
                 val items = orderItemDao.getItemsForOrderSync(orderId)
 
-                // Validate stock
+                // Validate stock (only real inventory tiles)
                 for (item in items) {
+                    if (item.productId <= 0L || item.itemType != "TILE") continue
                     val product = productDao.getProductById(item.productId)
                         ?: return@withTransaction Result.failure(
                             IllegalStateException("Product '${item.tileName}' not found.")
@@ -309,7 +559,8 @@ class MouryaRepository(val database: AppDatabase) {
 
                 // Deduct stock
                 for (item in items) {
-                    val product = productDao.getProductById(item.productId)!!
+                    if (item.productId <= 0L || item.itemType != "TILE") continue
+                    val product = productDao.getProductById(item.productId) ?: continue
                     productDao.updateStock(product.id, product.stockPieces - item.totalPieces)
                 }
 
@@ -337,15 +588,18 @@ class MouryaRepository(val database: AppDatabase) {
                 if (wasConfirmed && !willBeConfirmed) {
                     // Revert old stock
                     for (item in oldItems) {
+                        if (item.productId <= 0L || item.itemType != "TILE") continue
                         val product = productDao.getProductById(item.productId)
                         if (product != null) {
                             productDao.updateStock(product.id, product.stockPieces + item.totalPieces)
                         }
                     }
                 } else if (wasConfirmed && willBeConfirmed) {
-                    // Calculate deltas
-                    val oldPiecesMap = oldItems.groupBy { it.productId }.mapValues { entry -> entry.value.sumOf { it.totalPieces } }
-                    val newPiecesMap = newItems.groupBy { it.productId }.mapValues { entry -> entry.value.sumOf { it.totalPieces } }
+                    // Calculate deltas only for real inventory tiles
+                    val oldPiecesMap = oldItems.filter { it.productId > 0L && it.itemType == "TILE" }
+                        .groupBy { it.productId }.mapValues { entry -> entry.value.sumOf { it.totalPieces } }
+                    val newPiecesMap = newItems.filter { it.productId > 0L && it.itemType == "TILE" }
+                        .groupBy { it.productId }.mapValues { entry -> entry.value.sumOf { it.totalPieces } }
 
                     val allProductIds = (oldPiecesMap.keys + newPiecesMap.keys).distinct()
 
@@ -371,13 +625,14 @@ class MouryaRepository(val database: AppDatabase) {
                         val newP = newPiecesMap[pid] ?: 0
                         val delta = newP - oldP
                         if (delta != 0) {
-                            val product = productDao.getProductById(pid)!!
+                            val product = productDao.getProductById(pid) ?: continue
                             productDao.updateStock(pid, product.stockPieces - delta)
                         }
                     }
                 } else if (!wasConfirmed && willBeConfirmed) {
-                    // Deduct all new pieces
+                    // Deduct all new pieces (inventory tiles only)
                     for (item in newItems) {
+                        if (item.productId <= 0L || item.itemType != "TILE") continue
                         val product = productDao.getProductById(item.productId)
                             ?: return@withTransaction Result.failure(IllegalStateException("Product '${item.tileName}' not found"))
                         if (product.stockPieces < item.totalPieces) {
@@ -387,9 +642,24 @@ class MouryaRepository(val database: AppDatabase) {
                         }
                     }
                     for (item in newItems) {
-                        val product = productDao.getProductById(item.productId)!!
+                        if (item.productId <= 0L || item.itemType != "TILE") continue
+                        val product = productDao.getProductById(item.productId) ?: continue
                         productDao.updateStock(product.id, product.stockPieces - item.totalPieces)
                     }
+                }
+
+                // Preserve existing delivered quantities per product when editing order items
+                val oldDeliveredByProduct = oldItems.associateBy { it.productId }
+                val adjustedItems = newItems.map { item ->
+                    val prev = oldDeliveredByProduct[item.productId]
+                    val ppb = item.piecesPerBox.coerceAtLeast(1)
+                    val prevDelPieces = prev?.deliveredTotalPieces ?: if (oldOrder.deliveryStatus == "FULL_DELIVERED") item.totalPieces else 0
+                    val clamped = prevDelPieces.coerceIn(0, item.totalPieces)
+                    item.copy(
+                        orderId = updatedOrder.id,
+                        deliveredBoxes = clamped / ppb,
+                        deliveredPieces = clamped % ppb
+                    )
                 }
 
                 // Update order and items
@@ -399,7 +669,8 @@ class MouryaRepository(val database: AppDatabase) {
                     )
                 )
                 orderItemDao.deleteItemsForOrder(updatedOrder.id)
-                orderItemDao.insertAll(newItems.map { it.copy(orderId = updatedOrder.id) })
+                orderItemDao.insertAll(adjustedItems)
+                recomputeOrderDeliveryStatus(updatedOrder.id)
 
                 Result.success(Unit)
             }
@@ -568,6 +839,7 @@ class MouryaRepository(val database: AppDatabase) {
 
                 if (order.status == "CONFIRMED" && restoreStock) {
                     for (item in items) {
+                        if (item.productId <= 0L || item.itemType != "TILE") continue
                         val product = productDao.getProductById(item.productId)
                         if (product != null) {
                             productDao.updateStock(product.id, product.stockPieces + item.totalPieces)
@@ -575,6 +847,8 @@ class MouryaRepository(val database: AppDatabase) {
                     }
                 }
 
+                orderReturnExchangeDao.deleteForOrder(orderId)
+                orderDeliveryDao.deleteForOrder(orderId)
                 orderItemDao.deleteItemsForOrder(orderId)
                 orderDao.deleteById(orderId)
                 Result.success(Unit)
@@ -584,8 +858,300 @@ class MouryaRepository(val database: AppDatabase) {
         }
     }
 
+    /**
+     * Complete Return / Exchange / Cash Refund / Hold Replacement workflow:
+     * - outcomeType: "REFUND_CASH", "REFUND_BALANCE", "EXCHANGE_TILE", "EXCHANGE_OTHER"
+     * - replacementDeliveryStatus: "TAKEN" (अभी ले गए) or "HOLD" (होल्ड / बाद में ले जाएंगे) or "NONE"
+     */
+    suspend fun processReturnOrExchange(
+        orderId: Long,
+        orderItemId: Long,
+        returnBoxes: Int,
+        returnLoose: Int,
+        outcomeType: String,
+        replacementProductId: Long? = null,
+        replacementCustomName: String = "",
+        replacementCustomSize: String = "",
+        replacementBoxes: Int = 0,
+        replacementLoose: Int = 0,
+        replacementRatePerBox: Double = 0.0,
+        replacementCustomTotal: Double = 0.0,
+        replacementDeliveryStatus: String = "TAKEN",
+        notes: String = ""
+    ): Result<String> {
+        return try {
+            database.withTransaction {
+                val order = orderDao.getOrderById(orderId)
+                    ?: return@withTransaction Result.failure(IllegalStateException("ऑर्डर नहीं मिला।"))
+                val orderItem = orderItemDao.getItemById(orderItemId)
+                    ?: return@withTransaction Result.failure(IllegalStateException("ऑर्डर आइटम नहीं मिला।"))
+
+                val ppb = orderItem.piecesPerBox.coerceAtLeast(1)
+                val returnedTotalPieces = (returnBoxes * ppb) + returnLoose
+                if (returnedTotalPieces <= 0) {
+                    return@withTransaction Result.failure(IllegalArgumentException("कृपया वापसी की सही मात्रा दर्ज करें!"))
+                }
+                if (returnedTotalPieces > orderItem.totalPieces) {
+                    return@withTransaction Result.failure(
+                        IllegalArgumentException("वापसी संख्या बेची गई मात्रा (${orderItem.fullBoxes} Bx + ${orderItem.loosePieces} Pcs) से अधिक नहीं हो सकती!")
+                    )
+                }
+
+                val pieceRate = if (orderItem.totalPieces > 0) orderItem.lineTotal / orderItem.totalPieces else 0.0
+                val returnedAmount = (returnedTotalPieces * pieceRate).coerceAtLeast(0.0)
+
+                // 1. Restore returned tile stock if CONFIRMED & inventory tile
+                if (order.status == "CONFIRMED" && orderItem.productId > 0L && orderItem.itemType == "TILE") {
+                    val prod = productDao.getProductById(orderItem.productId)
+                    if (prod != null) {
+                        productDao.updateStock(prod.id, prod.stockPieces + returnedTotalPieces)
+                        stockMovementDao.insert(
+                            com.example.data.model.StockMovement(
+                                title = "${prod.size} (${prod.code})",
+                                description = "टाइल वापसी • #${order.invoiceNumber}",
+                                changeDisplay = "+$returnBoxes Bx" + if (returnLoose > 0) ", +$returnLoose Pcs" else "",
+                                isPositive = true
+                            )
+                        )
+                    }
+                }
+
+                // 2. Reduce or delete returned OrderItemEntity (and clamp delivered qty)
+                val remainingPieces = orderItem.totalPieces - returnedTotalPieces
+                if (remainingPieces <= 0) {
+                    orderItemDao.deleteById(orderItem.id)
+                } else {
+                    val newBoxes = remainingPieces / ppb
+                    val newLoose = remainingPieces % ppb
+                    val newLineTotal = remainingPieces * pieceRate
+                    val clampedDel = orderItem.deliveredTotalPieces.coerceAtMost(remainingPieces)
+                    orderItemDao.update(
+                        orderItem.copy(
+                            fullBoxes = newBoxes,
+                            loosePieces = newLoose,
+                            lineTotal = newLineTotal,
+                            deliveredBoxes = clampedDel / ppb,
+                            deliveredPieces = clampedDel % ppb
+                        )
+                    )
+                }
+
+                // 3. Process Replacement if Exchange
+                val now = System.currentTimeMillis()
+                var repName = ""
+                var repCode = ""
+                var repSize = ""
+                var repBoxes = 0
+                var repLoose = 0
+                var repAmount = 0.0
+                var finalDelStatus = "NONE"
+
+                if (outcomeType == "EXCHANGE_TILE") {
+                    val repProduct = replacementProductId?.let { productDao.getProductById(it) }
+                        ?: return@withTransaction Result.failure(IllegalArgumentException("कृपया बदले में दी जाने वाली दूसरी टाइल चुनें!"))
+                    val repPpb = repProduct.piecesPerBox.coerceAtLeast(1)
+                    val repTotalPieces = (replacementBoxes * repPpb) + replacementLoose
+                    if (repTotalPieces <= 0) {
+                        return@withTransaction Result.failure(IllegalArgumentException("कृपया बदली टाइल की मात्रा (बॉक्स/पीस) दर्ज करें!"))
+                    }
+                    if (order.status == "CONFIRMED" && repProduct.stockPieces < repTotalPieces) {
+                        return@withTransaction Result.failure(
+                            IllegalStateException("${repProduct.name} का स्टॉक कम है! उपलब्ध: ${repProduct.stockDisplay}")
+                        )
+                    }
+                    val rate = if (replacementRatePerBox > 0.0) replacementRatePerBox else repProduct.defaultSellingPrice
+                    repAmount = (replacementBoxes * rate) + (replacementLoose * (rate / repPpb))
+                    repName = repProduct.name
+                    repCode = repProduct.code
+                    repSize = repProduct.size
+                    repBoxes = replacementBoxes
+                    repLoose = replacementLoose
+                    finalDelStatus = if (replacementDeliveryStatus == "HOLD") "HOLD" else "TAKEN"
+
+                    if (order.status == "CONFIRMED") {
+                        productDao.updateStock(repProduct.id, repProduct.stockPieces - repTotalPieces)
+                        stockMovementDao.insert(
+                            com.example.data.model.StockMovement(
+                                title = "${repProduct.size} (${repProduct.code})",
+                                description = "बदली (Exchange ${if (finalDelStatus == "HOLD") "HOLD" else "TAKEN"}) • #${order.invoiceNumber}",
+                                changeDisplay = "-$repBoxes Bx" + if (repLoose > 0) ", -$repLoose Pcs" else "",
+                                isPositive = false
+                            )
+                        )
+                    }
+
+                    val newItemId = orderItemDao.insert(
+                        OrderItemEntity(
+                            orderId = orderId,
+                            productId = repProduct.id,
+                            tileCode = repProduct.code,
+                            tileName = repProduct.name,
+                            tileSize = repProduct.size,
+                            piecesPerBox = repPpb,
+                            tilePhotoUri = repProduct.photoUri,
+                            fullBoxes = repBoxes,
+                            loosePieces = repLoose,
+                            pricePerBox = rate,
+                            lineTotal = repAmount,
+                            deliveredBoxes = if (finalDelStatus == "TAKEN") repBoxes else 0,
+                            deliveredPieces = if (finalDelStatus == "TAKEN") repLoose else 0,
+                            itemType = "TILE"
+                        )
+                    )
+                    if (finalDelStatus == "TAKEN") {
+                        orderDeliveryDao.insert(
+                            com.example.data.model.OrderDeliveryLog(
+                                orderId = orderId,
+                                orderItemId = newItemId,
+                                tileCode = repProduct.code,
+                                tileName = repProduct.name,
+                                tileSize = repProduct.size,
+                                piecesPerBox = repPpb,
+                                boxesDelivered = repBoxes,
+                                piecesDelivered = repLoose,
+                                deliveredAt = now,
+                                receiverName = order.customerName,
+                                notes = "बदली (Exchange) में तुरंत ले गए"
+                            )
+                        )
+                    }
+                } else if (outcomeType == "EXCHANGE_OTHER") {
+                    if (replacementCustomName.isBlank()) {
+                        return@withTransaction Result.failure(IllegalArgumentException("कृपया बदले में दिए गए सामान का नाम लिखें!"))
+                    }
+                    repName = replacementCustomName.trim()
+                    repCode = "EXCH"
+                    repSize = replacementCustomSize.trim().ifBlank { "Other" }
+                    repBoxes = replacementBoxes.coerceAtLeast(1)
+                    repLoose = 0
+                    repAmount = replacementCustomTotal.coerceAtLeast(0.0)
+                    finalDelStatus = if (replacementDeliveryStatus == "HOLD") "HOLD" else "TAKEN"
+
+                    val newItemId = orderItemDao.insert(
+                        OrderItemEntity(
+                            orderId = orderId,
+                            productId = -System.currentTimeMillis(),
+                            tileCode = repCode,
+                            tileName = repName,
+                            tileSize = repSize,
+                            piecesPerBox = 1,
+                            tilePhotoUri = null,
+                            fullBoxes = repBoxes,
+                            loosePieces = 0,
+                            pricePerBox = if (repBoxes > 0) repAmount / repBoxes else repAmount,
+                            lineTotal = repAmount,
+                            deliveredBoxes = if (finalDelStatus == "TAKEN") repBoxes else 0,
+                            deliveredPieces = 0,
+                            itemType = "MANUAL"
+                        )
+                    )
+                    if (finalDelStatus == "TAKEN") {
+                        orderDeliveryDao.insert(
+                            com.example.data.model.OrderDeliveryLog(
+                                orderId = orderId,
+                                orderItemId = newItemId,
+                                tileCode = repCode,
+                                tileName = repName,
+                                tileSize = repSize,
+                                piecesPerBox = 1,
+                                boxesDelivered = repBoxes,
+                                piecesDelivered = 0,
+                                deliveredAt = now,
+                                receiverName = order.customerName,
+                                notes = "बदली (Exchange) में अन्य सामान ले गए"
+                            )
+                        )
+                    }
+                }
+
+                // 4. Recalculate Order Financials
+                val netDiff = repAmount - returnedAmount // +ve: customer pays more, -ve: refund/credit
+                val updatedItemsNow = orderItemDao.getItemsForOrderSync(orderId)
+                val newSubtotal = updatedItemsNow.sumOf { it.lineTotal }.coerceAtLeast(0.0)
+                val newGrandTotal = (newSubtotal - order.discount).coerceAtLeast(0.0)
+                val newPaidAmount = when (outcomeType) {
+                    "REFUND_CASH" -> (order.paidAmount - returnedAmount).coerceAtLeast(0.0)
+                    else -> order.paidAmount.coerceAtMost(newGrandTotal)
+                }
+                val newBalance = (newGrandTotal - newPaidAmount).coerceAtLeast(0.0)
+
+                val statusLabelHi = when (outcomeType) {
+                    "REFUND_CASH" -> "पैसे नकद वापस (Cash Refund ₹${returnedAmount.toInt()})"
+                    "REFUND_BALANCE" -> "बिल बकाया में घटाया (-₹${returnedAmount.toInt()})"
+                    "EXCHANGE_TILE" -> "बदली टाइल: $repName ($repBoxes Bx" + (if (repLoose > 0) "+$repLoose Pcs" else "") + ") [${if (finalDelStatus == "HOLD") "होल्ड / बाकी" else "ले गए"}]"
+                    else -> "बदली सामान: $repName (Qty: $repBoxes, ₹${repAmount.toInt()}) [${if (finalDelStatus == "HOLD") "होल्ड / बाकी" else "ले गए"}]"
+                }
+                val noteLine = "\n[वापसी/बदली]: ${orderItem.tileName} ($returnBoxes Bx" + (if (returnLoose > 0) "+$returnLoose Pcs" else "") + ") -> $statusLabelHi" +
+                    if (notes.isNotBlank()) " • $notes" else ""
+
+                val updatedHistoryJson = try {
+                    val arr = if (order.paymentHistoryJson.isNotBlank()) JSONArray(order.paymentHistoryJson) else JSONArray()
+                    arr.put(JSONObject().apply {
+                        put("amount", if (outcomeType == "REFUND_CASH") -returnedAmount else netDiff)
+                        put("date", java.text.SimpleDateFormat("dd/MM/yyyy hh:mm a", java.util.Locale.ENGLISH).format(java.util.Date(now)))
+                        put("mode", outcomeType)
+                        put("note", "$statusLabelHi" + if (notes.isNotBlank()) " ($notes)" else "")
+                        put("balanceAfter", newBalance)
+                    })
+                    arr.toString()
+                } catch (_: Exception) {
+                    order.paymentHistoryJson
+                }
+
+                orderDao.update(
+                    order.copy(
+                        subtotal = newSubtotal,
+                        grandTotal = newGrandTotal,
+                        paidAmount = newPaidAmount,
+                        balanceAmount = newBalance,
+                        paymentHistoryJson = updatedHistoryJson,
+                        notes = (order.notes + noteLine).trim()
+                    )
+                )
+
+                // 5. Save dedicated Return/Exchange log record
+                orderReturnExchangeDao.insert(
+                    com.example.data.model.OrderReturnExchangeLog(
+                        orderId = orderId,
+                        returnedItemId = orderItem.id,
+                        returnedTileCode = orderItem.tileCode,
+                        returnedTileName = orderItem.tileName,
+                        returnedTileSize = orderItem.tileSize,
+                        returnedBoxes = returnBoxes,
+                        returnedPieces = returnLoose,
+                        returnedAmount = returnedAmount,
+                        outcomeType = outcomeType,
+                        replacementItemName = repName,
+                        replacementTileCode = repCode,
+                        replacementTileSize = repSize,
+                        replacementBoxes = repBoxes,
+                        replacementPieces = repLoose,
+                        replacementAmount = repAmount,
+                        replacementDeliveryStatus = finalDelStatus,
+                        netAmountDifference = netDiff,
+                        notes = notes.trim(),
+                        createdAt = now
+                    )
+                )
+
+                recomputeOrderDeliveryStatus(orderId)
+                Result.success("✅ वापसी/बदली रिकॉर्ड सुरक्षित: $statusLabelHi")
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun updatePdfPriceVisibility(orderId: Long, showPrice: Boolean) {
         orderDao.updateShowPriceOnPdf(orderId, showPrice)
+    }
+
+    suspend fun updatePdfSizeTotalVisibility(orderId: Long, showSizeTotal: Boolean) {
+        orderDao.updateShowSizeTotalOnPdf(orderId, showSizeTotal)
+    }
+
+    suspend fun updatePdfDeliveryStatusVisibility(orderId: Long, showDelivery: Boolean) {
+        orderDao.updateShowDeliveryStatusOnPdf(orderId, showDelivery)
     }
 
     suspend fun addOrderPayment(
@@ -713,7 +1279,25 @@ class MouryaRepository(val database: AppDatabase) {
     }
 
     suspend fun autoMarkPresentForDate(dateString: String, timeMillis: Long = System.currentTimeMillis()): Int {
-        val cleanDate = dateString.trim()
+        val rawDate = dateString.trim()
+        // Normalize to yyyy-MM-dd so it always matches StaffAttendance.dateString & monthly salary queries!
+        val cleanDate = try {
+            if (rawDate.matches(Regex("\\d{4}-\\d{2}-\\d{2}"))) {
+                rawDate
+            } else if (rawDate.matches(Regex("\\d{2}/\\d{2}/\\d{4}"))) {
+                val parsed = java.text.SimpleDateFormat("dd/MM/yyyy", java.util.Locale.ENGLISH).parse(rawDate)
+                if (parsed != null) {
+                    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ENGLISH).format(parsed)
+                } else {
+                    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ENGLISH).format(java.util.Date(timeMillis))
+                }
+            } else {
+                java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ENGLISH).format(java.util.Date(timeMillis))
+            }
+        } catch (_: Exception) {
+            java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ENGLISH).format(java.util.Date(timeMillis))
+        }
+
         val allActive = staffDao.getAllActiveStaffSync()
         val existingToday = staffDao.getAttendanceForDateSync(cleanDate).associateBy { it.staffId }
         var markedCount = 0
@@ -963,12 +1547,16 @@ class MouryaRepository(val database: AppDatabase) {
         return Result.success(created)
     }
 
-    suspend fun approveUser(userId: Long, context: Context? = null): Result<Unit> {
+    suspend fun approveUser(userId: Long, context: Context? = null): Result<Boolean> {
         appUserDao.updateApproval(userId, "APPROVED", true)
         val user = appUserDao.getUserById(userId)
+        var cloudOk = false
         if (user != null) {
-            com.example.util.PermanentVaultHelper.publishCloudUser(user.copy(approvalStatus = "APPROVED", isActive = true))
-            com.example.util.PermanentVaultHelper.publishBlockedUser(user.phone, false)
+            val normPhone = com.example.util.PermanentVaultHelper.normalizePhone(user.phone)
+            com.example.util.PermanentVaultHelper.unmarkPhoneDeleted(normPhone, context)
+            val ok1 = com.example.util.PermanentVaultHelper.publishCloudUser(user.copy(phone = normPhone, approvalStatus = "APPROVED", isActive = true))
+            val ok2 = com.example.util.PermanentVaultHelper.publishBlockedUser(normPhone, false)
+            cloudOk = ok1 || ok2
             try {
                 val liveAdminConfig = com.example.util.PermanentVaultHelper.fetchLiveCloudAdminConfig()
                     ?: adminGlobalConfigDao.getConfigSync()
@@ -991,32 +1579,37 @@ class MouryaRepository(val database: AppDatabase) {
         if (context != null) {
             com.example.util.PermanentVaultHelper.saveUsersRegistry(context, appUserDao.getAllUsersSync())
         }
-        return Result.success(Unit)
+        return Result.success(cloudOk)
     }
 
-    suspend fun rejectUser(userId: Long, context: Context? = null): Result<Unit> {
+    suspend fun rejectUser(userId: Long, context: Context? = null): Result<Boolean> {
         appUserDao.updateApproval(userId, "REJECTED", false)
         val user = appUserDao.getUserById(userId)
+        var cloudOk = false
         if (user != null) {
-            com.example.util.PermanentVaultHelper.publishCloudUser(user.copy(approvalStatus = "REJECTED", isActive = false))
-            com.example.util.PermanentVaultHelper.publishBlockedUser(user.phone, true)
+            val normPhone = com.example.util.PermanentVaultHelper.normalizePhone(user.phone)
+            val ok1 = com.example.util.PermanentVaultHelper.publishCloudUser(user.copy(phone = normPhone, approvalStatus = "REJECTED", isActive = false))
+            val ok2 = com.example.util.PermanentVaultHelper.publishBlockedUser(normPhone, true)
+            cloudOk = ok1 || ok2
         }
         if (context != null) {
             com.example.util.PermanentVaultHelper.saveUsersRegistry(context, appUserDao.getAllUsersSync())
         }
-        return Result.success(Unit)
+        return Result.success(cloudOk)
     }
 
 
     suspend fun saveUser(user: com.example.data.model.AppUser, context: Context? = null): Long {
-        com.example.util.PermanentVaultHelper.unmarkPhoneDeleted(user.phone, context)
-        val id = if (user.id == 0L) {
-            appUserDao.insert(user)
+        val normPhone = com.example.util.PermanentVaultHelper.normalizePhone(user.phone)
+        val normalized = user.copy(phone = normPhone.ifBlank { user.phone.trim() })
+        com.example.util.PermanentVaultHelper.unmarkPhoneDeleted(normalized.phone, context)
+        val id = if (normalized.id == 0L) {
+            appUserDao.insert(normalized)
         } else {
-            appUserDao.update(user)
-            user.id
+            appUserDao.update(normalized)
+            normalized.id
         }
-        val saved = appUserDao.getUserById(id) ?: user.copy(id = id)
+        val saved = appUserDao.getUserById(id) ?: normalized.copy(id = id)
         com.example.util.PermanentVaultHelper.publishCloudUser(saved)
         if (context != null) {
             com.example.util.PermanentVaultHelper.saveUsersRegistry(context, appUserDao.getAllUsersSync())
@@ -1024,13 +1617,23 @@ class MouryaRepository(val database: AppDatabase) {
         return id
     }
 
-    suspend fun updateUser(user: com.example.data.model.AppUser, context: Context? = null) {
-        com.example.util.PermanentVaultHelper.unmarkPhoneDeleted(user.phone, context)
-        appUserDao.update(user)
-        com.example.util.PermanentVaultHelper.publishCloudUser(user)
+    suspend fun updateUser(user: com.example.data.model.AppUser, context: Context? = null, previousPhone: String? = null): Boolean {
+        val normPhone = com.example.util.PermanentVaultHelper.normalizePhone(user.phone)
+        val normalized = user.copy(phone = normPhone.ifBlank { user.phone.trim() })
+        com.example.util.PermanentVaultHelper.unmarkPhoneDeleted(normalized.phone, context)
+        appUserDao.update(normalized)
+        // If Admin changed the user's mobile number, revoke the old phone so old session logs out immediately!
+        if (!previousPhone.isNullOrBlank()) {
+            val prevNorm = com.example.util.PermanentVaultHelper.normalizePhone(previousPhone)
+            if (prevNorm.isNotBlank() && prevNorm != normalized.phone) {
+                com.example.util.PermanentVaultHelper.publishBlockedUser(prevNorm, true)
+            }
+        }
+        val cloudOk = com.example.util.PermanentVaultHelper.publishCloudUser(normalized)
         if (context != null) {
             com.example.util.PermanentVaultHelper.saveUsersRegistry(context, appUserDao.getAllUsersSync())
         }
+        return cloudOk
     }
 
     suspend fun updateUserPassword(userId: Long, newPass: String, context: Context? = null) {
@@ -1044,7 +1647,7 @@ class MouryaRepository(val database: AppDatabase) {
         }
     }
 
-    suspend fun updateUserStatus(userId: Long, isActive: Boolean, context: Context? = null) {
+    suspend fun updateUserStatus(userId: Long, isActive: Boolean, context: Context? = null): Boolean {
         appUserDao.updateStatus(userId, isActive)
         if (isActive) {
             appUserDao.updateApproval(userId, "APPROVED", true)
@@ -1052,9 +1655,13 @@ class MouryaRepository(val database: AppDatabase) {
             appUserDao.updateApproval(userId, "BLOCKED", false)
         }
         val user = appUserDao.getUserById(userId)
+        var cloudOk = false
         if (user != null) {
-            com.example.util.PermanentVaultHelper.publishBlockedUser(user.phone, !isActive)
-            com.example.util.PermanentVaultHelper.publishCloudUser(user.copy(isActive = isActive, approvalStatus = if (isActive) "APPROVED" else "BLOCKED"))
+            val normPhone = com.example.util.PermanentVaultHelper.normalizePhone(user.phone)
+            val updated = user.copy(phone = normPhone.ifBlank { user.phone.trim() }, isActive = isActive, approvalStatus = if (isActive) "APPROVED" else "BLOCKED")
+            val ok1 = com.example.util.PermanentVaultHelper.publishBlockedUser(updated.phone, !isActive)
+            val ok2 = com.example.util.PermanentVaultHelper.publishCloudUser(updated)
+            cloudOk = ok1 || ok2
             try {
                 val cfg = com.example.util.TelegramActiveConfig.resolve(
                     adminGlobalConfigDao.getConfigSync(),
@@ -1067,12 +1674,14 @@ class MouryaRepository(val database: AppDatabase) {
         if (context != null) {
             com.example.util.PermanentVaultHelper.saveUsersRegistry(context, appUserDao.getAllUsersSync())
         }
+        return cloudOk
     }
 
-    suspend fun deleteUser(id: Long, context: Context? = null) {
+    suspend fun deleteUser(id: Long, context: Context? = null): Boolean {
         val user = appUserDao.getUserById(id)
+        var cloudOk = false
         if (user != null) {
-            com.example.util.PermanentVaultHelper.publishDeletedUser(user.phone, context)
+            cloudOk = com.example.util.PermanentVaultHelper.publishDeletedUser(user.phone, context)
             appUserDao.deleteByPhone(user.phone)
             try {
                 val cfg = com.example.util.TelegramActiveConfig.resolve(
@@ -1094,6 +1703,7 @@ class MouryaRepository(val database: AppDatabase) {
             }
             com.example.util.PermanentVaultHelper.saveUsersRegistry(context, remainingUsers)
         }
+        return cloudOk
     }
 
     suspend fun ensureDefaultUserExists() {

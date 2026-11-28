@@ -29,16 +29,11 @@ object PdfGenerator {
     fun generateOrderPdf(
         context: Context,
         orderWithItems: OrderWithItems,
-        settings: ShopSettings
+        settings: ShopSettings,
+        deliveryLogs: List<com.example.data.model.OrderDeliveryLog> = emptyList()
     ): File {
         val pdfDocument = PdfDocument()
-        val pageInfo = PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, 1).create()
-        val page = pdfDocument.startPage(pageInfo)
-        val canvas = page.canvas
-
-        drawPdfContent(context, canvas, orderWithItems, settings)
-
-        pdfDocument.finishPage(page)
+        drawPdfContent(context, pdfDocument, orderWithItems, settings, deliveryLogs)
 
         // Save to cache/pdfs directory
         val pdfsDir = File(context.cacheDir, "pdfs")
@@ -54,15 +49,26 @@ object PdfGenerator {
         return outputFile
     }
 
+    private fun fmtClean(v: Double): String {
+        return if (v % 1.0 == 0.0) v.toInt().toString() else String.format(Locale.US, "%.2f", v)
+    }
+
     private fun drawPdfContent(
         context: Context,
-        canvas: Canvas,
+        pdfDocument: PdfDocument,
         orderWithItems: OrderWithItems,
-        settings: ShopSettings
+        settings: ShopSettings,
+        deliveryLogs: List<com.example.data.model.OrderDeliveryLog>
     ) {
+        var pageNumber = 1
+        var currentPage = pdfDocument.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create())
+        var canvas = currentPage.canvas
+
         val order = orderWithItems.order
         val items = orderWithItems.items
         val showPrices = order.showPriceOnPdf
+        val showSizeTotals = order.showSizeTotalOnPdf
+        val showDeliveryStatus = order.showDeliveryStatusOnPdf
         val pdfSizeConfig = PdfSizeDisplayConfig.fromJson(settings.pdfSizeDisplayConfigJson)
 
         // Color definitions dynamically derived from Shop App Theme
@@ -318,12 +324,60 @@ object PdfGenerator {
             canvas.drawText("AMOUNT (₹)", colTotalX, tableTop + 14f, paint)
         }
 
-        // 8. Items Table Rows
+        // 8. Items Table Rows (with Marble & Delivery support + automatic multi-page break)
         var currentY = tableTop + headerHeight
-        val rowHeight = 44f
-        val imgThumbSize = 34f
+        val rowHeight = if (showDeliveryStatus) 50f else 44f
+        val maxContentY = PAGE_HEIGHT - 105f
+
+        fun startNextPage(drawTableHeader: Boolean) {
+            // Bottom accent bar on finishing page
+            paint.style = Paint.Style.FILL
+            paint.color = navyPrimary
+            canvas.drawRect(0f, PAGE_HEIGHT - 6f, PAGE_WIDTH.toFloat(), PAGE_HEIGHT.toFloat(), paint)
+            pdfDocument.finishPage(currentPage)
+
+            pageNumber++
+            currentPage = pdfDocument.startPage(PdfDocument.PageInfo.Builder(PAGE_WIDTH, PAGE_HEIGHT, pageNumber).create())
+            canvas = currentPage.canvas
+
+            paint.style = Paint.Style.FILL
+            paint.color = navyPrimary
+            canvas.drawRect(0f, 0f, PAGE_WIDTH.toFloat(), 10f, paint)
+            paint.color = textMuted
+            paint.typeface = Typeface.DEFAULT
+            paint.textSize = 8f
+            paint.textAlign = Paint.Align.RIGHT
+            canvas.drawText("Invoice #${order.invoiceNumber}  •  Page $pageNumber", rightX, 24f, paint)
+            currentY = 34f
+
+            if (drawTableHeader) {
+                paint.color = navyPrimary
+                paint.style = Paint.Style.FILL
+                canvas.drawRect(MARGIN, currentY, rightX, currentY + headerHeight, paint)
+                paint.color = Color.WHITE
+                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                paint.textSize = 8.5f
+                paint.textAlign = Paint.Align.LEFT
+                canvas.drawText("#", MARGIN + 6f, currentY + 14f, paint)
+                canvas.drawText("PHOTO", MARGIN + 26f, currentY + 14f, paint)
+                canvas.drawText("TILE / MARBLE PRODUCT", MARGIN + 72f, currentY + 14f, paint)
+                paint.textAlign = Paint.Align.CENTER
+                canvas.drawText("PCS/BX", colPcsBxX, currentY + 14f, paint)
+                canvas.drawText("BOX / SQFT", colBoxesX, currentY + 14f, paint)
+                canvas.drawText("LOOSE", colLooseX, currentY + 14f, paint)
+                if (showPrices) {
+                    paint.textAlign = Paint.Align.RIGHT
+                    canvas.drawText("RATE", colRateX, currentY + 14f, paint)
+                    canvas.drawText("AMOUNT (₹)", colTotalX, currentY + 14f, paint)
+                }
+                currentY += headerHeight
+            }
+        }
 
         for (i in items.indices) {
+            if (currentY + rowHeight > maxContentY) {
+                startNextPage(drawTableHeader = true)
+            }
             val item = items[i]
             val isEven = i % 2 == 0
 
@@ -343,7 +397,7 @@ object PdfGenerator {
             paint.textAlign = Paint.Align.LEFT
             canvas.drawText("${i + 1}", MARGIN + 6f, currentY + 24f, paint)
 
-            // Thumbnail Photo respecting user's custom PDF Size Display rules (orientation, scale, fit/crop, label)
+            // Thumbnail Photo respecting user's custom PDF Size Display rules
             val maxThumbW = 42f
             val maxThumbH = 34f
             val resolvedSize = PdfSizeDisplayConfig.resolveForTile(item.tileSize, pdfSizeConfig)
@@ -390,54 +444,98 @@ object PdfGenerator {
             }
 
             if (!photoDrawn) {
-                // Sleek tile graphic placeholder with realistic aspect ratio
-                paint.color = Color.rgb(241, 245, 249)
+                paint.color = if (item.isMarble) Color.rgb(254, 243, 199) else Color.rgb(241, 245, 249)
                 canvas.drawRoundRect(thumbRect, 3f, 3f, paint)
-                paint.color = borderColor
+                paint.color = if (item.isMarble) Color.rgb(217, 119, 6) else borderColor
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = 0.8f
                 canvas.drawRoundRect(thumbRect, 3f, 3f, paint)
                 paint.style = Paint.Style.FILL
 
-                paint.color = textMuted
+                paint.color = if (item.isMarble) Color.rgb(146, 64, 14) else textMuted
                 paint.textSize = 6f
                 paint.textAlign = Paint.Align.CENTER
-                canvas.drawText(resolvedSize.sizeLabelForPdf.take(10), thumbRect.centerX(), thumbRect.centerY() + 2.5f, paint)
+                val badgeTxt = if (item.isMarble) "MARBLE" else resolvedSize.sizeLabelForPdf.take(10)
+                canvas.drawText(badgeTxt, thumbRect.centerX(), thumbRect.centerY() + 2.5f, paint)
             }
 
-            // Tile Description & Size
+            // Product Description & Size
             paint.textAlign = Paint.Align.LEFT
             paint.color = textDark
             paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             paint.textSize = 9.5f
             val maxNameLen = if (showPrices) 28 else 40
-            canvas.drawText(item.tileName.take(maxNameLen), MARGIN + 72f, currentY + 18f, paint)
+            canvas.drawText(item.tileName.take(maxNameLen), MARGIN + 72f, currentY + 16f, paint)
 
             paint.typeface = Typeface.DEFAULT
-            paint.textSize = 8f
+            paint.textSize = 7.8f
             paint.color = textMuted
-            val detailsStr = "Code: ${item.tileCode} | Size: ${resolvedSize.sizeLabelForPdf}"
-            canvas.drawText(detailsStr, MARGIN + 72f, currentY + 32f, paint)
+            val detailsStr = if (item.isMarble) {
+                val unitLbl = if (item.marbleUnit == "FEET") "ft" else "in"
+                "Marble: ${fmtClean(item.marbleLength)}×${fmtClean(item.marbleWidth)} $unitLbl × ${item.marblePieces} Pcs = ${String.format(Locale.US, "%.2f", item.marbleTotalSqFt)} Sq.Ft"
+            } else {
+                "Code: ${item.tileCode} | Size: ${resolvedSize.sizeLabelForPdf}"
+            }
+            canvas.drawText(detailsStr.take(if (showPrices) 40 else 58), MARGIN + 72f, currentY + 29f, paint)
+
+            // Per-item Delivery Status line (Taken vs Pending) when switch is ON
+            if (showDeliveryStatus) {
+                paint.textSize = 7.2f
+                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                val unitShort = if (item.isMarble) "Pcs" else "Bx"
+                if (item.isFullyDelivered) {
+                    paint.color = confirmedGreen
+                    canvas.drawText(
+                        "✓ ले गए: ${item.deliveredBoxes} $unitShort" + (if (!item.isMarble && item.deliveredPieces > 0) "+${item.deliveredPieces} Pcs" else "") + " (पूरी डिलीवरी)",
+                        MARGIN + 72f,
+                        currentY + 41f,
+                        paint
+                    )
+                } else {
+                    paint.color = pendingOrange
+                    val takenStr = "${item.deliveredBoxes} $unitShort" + if (!item.isMarble && item.deliveredPieces > 0) "+${item.deliveredPieces} Pcs" else ""
+                    val pendStr = "${item.pendingFullBoxes} $unitShort" + if (!item.isMarble && item.pendingLoosePieces > 0) "+${item.pendingLoosePieces} Pcs" else ""
+                    canvas.drawText(
+                        "ले गए: $takenStr  |  बाकी बची: $pendStr",
+                        MARGIN + 72f,
+                        currentY + 41f,
+                        paint
+                    )
+                }
+            }
 
             // Quantities
             paint.textAlign = Paint.Align.CENTER
             paint.color = textDark
             paint.textSize = 9f
-            canvas.drawText("${item.piecesPerBox}", colPcsBxX, currentY + 24f, paint)
-
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            canvas.drawText("${item.fullBoxes}", colBoxesX, currentY + 24f, paint)
-
-            paint.typeface = Typeface.DEFAULT
-            val looseStr = if (item.loosePieces > 0) "${item.loosePieces} pcs" else "-"
-            canvas.drawText(looseStr, colLooseX, currentY + 24f, paint)
-
-            // (CRITICAL RULE CHECK: Total pieces is NEVER drawn on customer PDF!)
+            if (item.isMarble) {
+                paint.typeface = Typeface.DEFAULT
+                canvas.drawText("${item.marblePieces} Pcs", colPcsBxX, currentY + 24f, paint)
+                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                canvas.drawText(String.format(Locale.US, "%.2f", item.marbleTotalSqFt), colBoxesX, currentY + 24f, paint)
+                paint.typeface = Typeface.DEFAULT
+                paint.textSize = 7.5f
+                canvas.drawText("Sq.Ft", colLooseX, currentY + 24f, paint)
+                paint.textSize = 9f
+            } else {
+                paint.typeface = Typeface.DEFAULT
+                canvas.drawText("${item.piecesPerBox}", colPcsBxX, currentY + 24f, paint)
+                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                canvas.drawText("${item.fullBoxes}", colBoxesX, currentY + 24f, paint)
+                paint.typeface = Typeface.DEFAULT
+                val looseStr = if (item.loosePieces > 0) "${item.loosePieces} pcs" else "-"
+                canvas.drawText(looseStr, colLooseX, currentY + 24f, paint)
+            }
 
             if (showPrices) {
                 paint.textAlign = Paint.Align.RIGHT
                 paint.typeface = Typeface.DEFAULT
-                canvas.drawText(String.format(Locale.US, "₹%.2f", item.pricePerBox), colRateX, currentY + 24f, paint)
+                val rateLabel = if (item.isMarble) {
+                    "₹${fmtClean(item.marbleRatePerSqFt)}/ft²"
+                } else {
+                    String.format(Locale.US, "₹%.2f", item.pricePerBox)
+                }
+                canvas.drawText(rateLabel, colRateX, currentY + 24f, paint)
 
                 paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 paint.color = navyPrimary
@@ -447,7 +545,152 @@ object PdfGenerator {
             currentY += rowHeight
         }
 
-        // 9. Summary & Totals Section
+        // 8.5. SIZE-WISE BOX TOTAL SUMMARY (when order.showSizeTotalOnPdf == true)
+        if (showSizeTotals && items.isNotEmpty()) {
+            val tileItems = items.filter { !it.isMarble }
+            val marbleItems = items.filter { it.isMarble }
+
+            // Group tiles by normalized size preserving order
+            val sizeSummaryPairs = mutableListOf<String>()
+            val groupedBySize = linkedMapOf<String, Pair<Int, Int>>() // size -> (boxes, loose)
+            for (t in tileItems) {
+                val key = t.tileSize.trim().uppercase(Locale.ENGLISH).ifBlank { "OTHER" }
+                val prev = groupedBySize[key] ?: Pair(0, 0)
+                groupedBySize[key] = Pair(prev.first + t.fullBoxes, prev.second + t.loosePieces)
+            }
+            for ((sz, qty) in groupedBySize) {
+                val txt = "$sz: ${qty.first} Box" + if (qty.second > 0) " +${qty.second} Pcs" else ""
+                sizeSummaryPairs.add(txt)
+            }
+            if (marbleItems.isNotEmpty()) {
+                val totalSqFt = marbleItems.sumOf { it.marbleTotalSqFt }
+                val totalSlabs = marbleItems.sumOf { it.marblePieces }
+                sizeSummaryPairs.add("Marble: ${String.format(Locale.US, "%.2f", totalSqFt)} Sq.Ft ($totalSlabs Pcs)")
+            }
+
+            val totalBoxesAll = tileItems.sumOf { it.fullBoxes }
+            val totalLooseAll = tileItems.sumOf { it.loosePieces }
+            val summaryChunks = sizeSummaryPairs.chunked(3)
+            val boxHeight = 28f + (summaryChunks.size * 14f)
+
+            if (currentY + boxHeight + 12f > maxContentY) {
+                startNextPage(drawTableHeader = false)
+            }
+            currentY += 8f
+            val szRect = RectF(MARGIN, currentY, rightX, currentY + boxHeight)
+            paint.color = Color.rgb(236, 253, 245) // Soft Emerald tint
+            paint.style = Paint.Style.FILL
+            canvas.drawRoundRect(szRect, 6f, 6f, paint)
+            paint.color = Color.rgb(16, 185, 129)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.9f
+            canvas.drawRoundRect(szRect, 6f, 6f, paint)
+            paint.style = Paint.Style.FILL
+
+            paint.textAlign = Paint.Align.LEFT
+            paint.color = Color.rgb(6, 95, 70)
+            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            paint.textSize = 8.5f
+            canvas.drawText("SIZE-WISE BOX TOTAL (साइज़-वार कुल पेटी):", MARGIN + 10f, currentY + 14f, paint)
+
+            paint.textAlign = Paint.Align.RIGHT
+            val grandBoxTxt = buildString {
+                if (tileItems.isNotEmpty()) {
+                    append("कुल टाइल: $totalBoxesAll Box")
+                    if (totalLooseAll > 0) append(" + $totalLooseAll Pcs")
+                }
+            }
+            if (grandBoxTxt.isNotBlank()) {
+                canvas.drawText(grandBoxTxt, rightX - 10f, currentY + 14f, paint)
+            }
+
+            paint.textAlign = Paint.Align.LEFT
+            paint.color = textDark
+            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            paint.textSize = 8.5f
+            var lineY = currentY + 28f
+            for (chunk in summaryChunks) {
+                canvas.drawText(chunk.joinToString("    •    "), MARGIN + 10f, lineY, paint)
+                lineY += 14f
+            }
+            currentY += boxHeight
+        }
+
+        // 8.6. DELIVERY STATUS SUMMARY (Taken vs Pending + Dates) when order.showDeliveryStatusOnPdf == true
+        if (showDeliveryStatus && items.isNotEmpty()) {
+            val tileOnly = items.filter { !it.isMarble }
+            val orderedBx = tileOnly.sumOf { it.fullBoxes }
+            val takenBx = tileOnly.sumOf { it.deliveredBoxes }
+            val pendingBx = tileOnly.sumOf { it.pendingFullBoxes }
+            val pendingPcs = tileOnly.sumOf { it.pendingLoosePieces }
+            val recentLogs = deliveryLogs.take(3)
+            val delBoxHeight = 32f + (if (recentLogs.isNotEmpty()) 12f + (recentLogs.size * 11f) else 0f)
+
+            if (currentY + delBoxHeight + 12f > maxContentY) {
+                startNextPage(drawTableHeader = false)
+            }
+            currentY += 8f
+            val delRect = RectF(MARGIN, currentY, rightX, currentY + delBoxHeight)
+            val allDelivered = items.all { it.isFullyDelivered }
+            paint.color = if (allDelivered) Color.rgb(240, 253, 244) else Color.rgb(255, 247, 237)
+            paint.style = Paint.Style.FILL
+            canvas.drawRoundRect(delRect, 6f, 6f, paint)
+            paint.color = if (allDelivered) confirmedGreen else pendingOrange
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.9f
+            canvas.drawRoundRect(delRect, 6f, 6f, paint)
+            paint.style = Paint.Style.FILL
+
+            paint.textAlign = Paint.Align.LEFT
+            paint.color = if (allDelivered) Color.rgb(22, 101, 52) else Color.rgb(194, 65, 12)
+            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            paint.textSize = 8.5f
+            val statusHead = when {
+                allDelivered -> "DELIVERY STATUS: ✓ पूरी डिलीवरी हो चुकी है (All Delivered)"
+                takenBx == 0 && tileOnly.all { it.deliveredTotalPieces == 0 } -> "DELIVERY STATUS: 📦 होल्ड / अभी नहीं ले गए (Pending Pickup)"
+                else -> "DELIVERY STATUS: ⏳ आंशिक डिलीवरी (कुछ ले गए / कुछ बाकी)"
+            }
+            canvas.drawText(statusHead, MARGIN + 10f, currentY + 14f, paint)
+
+            paint.color = textDark
+            paint.textSize = 8.2f
+            paint.typeface = Typeface.DEFAULT
+            val countsLine = if (tileOnly.isNotEmpty()) {
+                "कुल ऑर्डर: $orderedBx Box   |   ले गए (Taken): $takenBx Box   |   बाकी बची (Remaining): $pendingBx Box" +
+                    if (pendingPcs > 0) " + $pendingPcs Pcs" else ""
+            } else {
+                val mTot = items.sumOf { it.fullBoxes }
+                val mTak = items.sumOf { it.deliveredBoxes }
+                val mPen = items.sumOf { it.pendingFullBoxes }
+                "कुल नग: $mTot Pcs   |   ले गए: $mTak Pcs   |   बाकी: $mPen Pcs"
+            }
+            canvas.drawText(countsLine, MARGIN + 10f, currentY + 26f, paint)
+
+            if (recentLogs.isNotEmpty()) {
+                var dy = currentY + 38f
+                paint.textSize = 7.4f
+                paint.color = textMuted
+                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                canvas.drawText("डिलीवरी तारीख हिस्ट्री (Pickup Dates):", MARGIN + 10f, dy, paint)
+                paint.typeface = Typeface.DEFAULT
+                paint.color = textDark
+                val delDateFmt = SimpleDateFormat("dd/MM/yyyy hh:mm a", Locale.ENGLISH)
+                for (log in recentLogs) {
+                    dy += 11f
+                    val dt = delDateFmt.format(Date(log.deliveredAt))
+                    val q = "${log.boxesDelivered} Bx" + if (log.piecesDelivered > 0) "+${log.piecesDelivered} Pcs" else ""
+                    val rec = if (log.receiverName.isNotBlank()) " • ${log.receiverName}" else ""
+                    canvas.drawText("• $dt — ${log.tileName.take(26)}: $q$rec", MARGIN + 14f, dy, paint)
+                }
+            }
+            currentY += delBoxHeight
+        }
+
+        // 9. Summary & Totals Section (break to next page if insufficient room above footer)
+        val neededSummaryHeight = if (showPrices) 136f else 54f
+        if (currentY + neededSummaryHeight > PAGE_HEIGHT - 96f) {
+            startNextPage(drawTableHeader = false)
+        }
         val summaryTop = currentY + 12f
         if (showPrices) {
             val totalBoxLeft = rightX - 220f
@@ -628,6 +871,7 @@ object PdfGenerator {
         // Bottom accent footer line
         paint.color = navyPrimary
         canvas.drawRect(0f, PAGE_HEIGHT - 6f, PAGE_WIDTH.toFloat(), PAGE_HEIGHT.toFloat(), paint)
+        pdfDocument.finishPage(currentPage)
     }
 
     private fun loadBitmap(context: Context, uriString: String): Bitmap? {

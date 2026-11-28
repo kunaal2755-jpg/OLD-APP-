@@ -44,6 +44,16 @@ import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Restore
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Intent
+import android.os.Build
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Warning
@@ -117,6 +127,7 @@ fun SettingsScreen(
     val settings by viewModel.shopSettings.collectAsStateWithLifecycle()
     val sizePricings by viewModel.sizePricings.collectAsStateWithLifecycle()
     val products by viewModel.products.collectAsStateWithLifecycle()
+    val tileLocations by viewModel.tileLocations.collectAsStateWithLifecycle()
 
     var currentUser by remember { mutableStateOf(UserSessionManager.getCurrentUser(context)) }
 
@@ -150,11 +161,42 @@ fun SettingsScreen(
     var notifyStaffAttendance by remember { mutableStateOf(settings.notifyStaffAttendance) }
     var notifyDailySummary by remember { mutableStateOf(settings.notifyDailySummary) }
 
-    // Evening Google Drive / Email Auto-Backup State
+    // Evening Google Drive / Email + Custom Mobile Folder Auto-Backup State
     var autoBackupEnabled by remember { mutableStateOf(settings.autoBackupEnabled) }
     var backupTargetEmail by remember { mutableStateOf(settings.backupTargetEmail) }
     var backupScheduledTime by remember { mutableStateOf(settings.backupScheduledTime) }
     var backupFromDateString by remember { mutableStateOf(settings.backupFromDateString) }
+    var backupFolderUri by remember { mutableStateOf(settings.backupFolderUri) }
+    var backupFolderName by remember { mutableStateOf(settings.backupFolderName.ifBlank { "TilesAndMarbles_Backups" }) }
+    var driveWebhookUrl by remember { mutableStateOf(settings.driveWebhookUrl) }
+    var showDriveWebhookGuide by remember { mutableStateOf(false) }
+    var isRunningAutoBackupTest by remember { mutableStateOf(false) }
+
+    val backupFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            try {
+                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                context.contentResolver.takePersistableUriPermission(treeUri, flags)
+            } catch (_: Throwable) {}
+            backupFolderUri = treeUri.toString()
+            viewModel.saveAutoBackupSettingsOnly(
+                autoBackupEnabled = autoBackupEnabled,
+                backupScheduledTime = backupScheduledTime,
+                backupFromDateString = backupFromDateString,
+                backupTargetEmail = backupTargetEmail,
+                backupFolderUri = treeUri.toString(),
+                backupFolderName = backupFolderName,
+                driveWebhookUrl = driveWebhookUrl
+            )
+            viewModel.showMessage("📁 कस्टम बैकअप फ़ोल्डर सेव हो गया: ${com.example.util.BackgroundScheduler.getReadableSafFolderName(treeUri.toString())}")
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
 
     LaunchedEffect(settings) {
         shopName = settings.shopName
@@ -188,12 +230,20 @@ fun SettingsScreen(
         backupTargetEmail = settings.backupTargetEmail
         backupScheduledTime = settings.backupScheduledTime
         backupFromDateString = settings.backupFromDateString
+        backupFolderUri = settings.backupFolderUri
+        backupFolderName = settings.backupFolderName.ifBlank { "TilesAndMarbles_Backups" }
+        driveWebhookUrl = settings.driveWebhookUrl
     }
 
     val activeTheme = getAppThemeOption(appTheme)
 
     var showAddSizePriceDialog by remember { mutableStateOf(false) }
     var editingSizePricing by remember { mutableStateOf<SizePricing?>(null) }
+    var showAddLocationDialog by remember { mutableStateOf(false) }
+    var newLocationNameInput by remember { mutableStateOf("") }
+    var renamingLocation by remember { mutableStateOf<com.example.data.model.TileLocation?>(null) }
+    var renameLocationInput by remember { mutableStateOf("") }
+    var deletingLocation by remember { mutableStateOf<com.example.data.model.TileLocation?>(null) }
     var showRestoreConfirmDialog by remember { mutableStateOf(false) }
     var backupFileToRestore by remember { mutableStateOf<File?>(null) }
     var lastCreatedBackupFile by remember { mutableStateOf<File?>(null) }
@@ -770,7 +820,10 @@ fun SettingsScreen(
                                     autoBackupEnabled = autoBackupEnabled,
                                     backupTargetEmail = backupTargetEmail,
                                     backupScheduledTime = backupScheduledTime,
-                                    backupFromDateString = backupFromDateString
+                                    backupFromDateString = backupFromDateString,
+                                    backupFolderUri = backupFolderUri,
+                                    backupFolderName = backupFolderName,
+                                    driveWebhookUrl = driveWebhookUrl
                                 )
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary),
@@ -1134,6 +1187,137 @@ fun SettingsScreen(
                 }
             }
 
+            // 4.2. Tile Storage Locations Management (Godown / Warehouse / Dukaan — Global Auto-Rename)
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "📍 टाइल लोकेशन सेटिंग (Godown / Warehouse / Dukaan)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = activeTheme.primary
+                                )
+                                Text(
+                                    text = "लोकेशन जोड़ें, नाम बदलें (सभी टाइलों में अपने आप बदलेगा) या हटाएं",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF64748B)
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    newLocationNameInput = ""
+                                    showAddLocationDialog = true
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.testTag("settings_add_location_btn")
+                            ) {
+                                Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Add", fontSize = 12.sp)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        if (tileLocations.isEmpty()) {
+                            Text(
+                                text = "अभी कोई लोकेशन नहीं है। '+ Add' दबाकर गोदाम, दुकान या वेयरहाउस जोड़ें।",
+                                fontSize = 12.sp,
+                                color = Color(0xFF64748B)
+                            )
+                        } else {
+                            tileLocations.forEach { loc ->
+                                val tileCount = products.count { it.location.equals(loc.name, ignoreCase = true) }
+                                Surface(
+                                    color = Color(0xFFF8FAFC),
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Surface(
+                                                color = Color(0xFFDCFCE7),
+                                                shape = RoundedCornerShape(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = "📍 ${loc.name}",
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 12.5.sp,
+                                                    color = Color(0xFF166534),
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "$tileCount टाइलें",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFF64748B)
+                                            )
+                                        }
+
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            IconButton(
+                                                onClick = {
+                                                    renamingLocation = loc
+                                                    renameLocationInput = loc.name
+                                                },
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .testTag("settings_edit_location_${loc.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Edit,
+                                                    contentDescription = "नाम बदलें",
+                                                    tint = activeTheme.primary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = { deletingLocation = loc },
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .testTag("settings_delete_location_${loc.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Delete,
+                                                    contentDescription = "हटाएं",
+                                                    tint = StatusError,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 4.5. PDF Tile Size Display Customizer (2X4, 12X18, etc.)
             item {
                 val allKnownSizes = remember(sizePricings, products) {
@@ -1405,6 +1589,28 @@ fun SettingsScreen(
 
             // 7.5 Scheduled Cumulative Evening Auto-Backup to Drive / Email
             item {
+                var diagRefreshKey by remember { mutableStateOf(0) }
+                var lastLiveTestSummary by remember { mutableStateOf<String?>(null) }
+                var oneMinTestScheduledText by remember { mutableStateOf<String?>(null) }
+
+                val liveSettingsForDiag = remember(
+                    settings, autoBackupEnabled, backupScheduledTime,
+                    backupTargetEmail, backupFolderUri, backupFolderName, driveWebhookUrl
+                ) {
+                    settings.copy(
+                        autoBackupEnabled = autoBackupEnabled,
+                        backupScheduledTime = backupScheduledTime,
+                        backupTargetEmail = backupTargetEmail,
+                        backupFolderUri = backupFolderUri,
+                        backupFolderName = backupFolderName,
+                        driveWebhookUrl = driveWebhookUrl
+                    )
+                }
+
+                val backupDiag = remember(liveSettingsForDiag, diagRefreshKey) {
+                    com.example.util.BackgroundScheduler.getAutoBackupDiagnostics(context, liveSettingsForDiag)
+                }
+
                 Card(
                     shape = RoundedCornerShape(14.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1422,13 +1628,13 @@ fun SettingsScreen(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Column {
                                     Text(
-                                        text = "📦 शाम का संचयी ऑटो-बैकअप (Drive / Email)",
+                                        text = "📦 ऑटो-बैकअप (Custom मोबाइल फ़ोल्डर + Google Drive)",
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 14.sp,
+                                        fontSize = 13.5.sp,
                                         color = activeTheme.primary
                                     )
                                     Text(
-                                        text = "नियत समय पर स्वतः ड्राइव/ईमेल पर संचयी बैकअप सुरक्षित होगा",
+                                        text = "ऐप बंद हो या खुला — तय समय पर टाइल फोटो सहित स्वतः बैकअप",
                                         fontSize = 11.sp,
                                         color = Color(0xFF64748B)
                                     )
@@ -1436,27 +1642,296 @@ fun SettingsScreen(
                             }
                             Switch(
                                 checked = autoBackupEnabled,
-                                onCheckedChange = { autoBackupEnabled = it }
+                                onCheckedChange = { enabled ->
+                                    autoBackupEnabled = enabled
+                                    if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                    viewModel.saveAutoBackupSettingsOnly(
+                                        autoBackupEnabled = enabled,
+                                        backupScheduledTime = backupScheduledTime,
+                                        backupFromDateString = backupFromDateString,
+                                        backupTargetEmail = backupTargetEmail,
+                                        backupFolderUri = backupFolderUri,
+                                        backupFolderName = backupFolderName,
+                                        driveWebhookUrl = driveWebhookUrl
+                                    )
+                                    diagRefreshKey++
+                                },
+                                modifier = Modifier.testTag("auto_backup_switch")
                             )
+                        }
+
+                        // LIVE AUTO-BACKUP HEALTH & DIAGNOSTICS PANEL (Always Visible)
+                        val diagBg = when {
+                            !autoBackupEnabled -> Color(0xFFF8FAFC)
+                            backupDiag.isHealthy -> Color(0xFFECFDF5)
+                            else -> Color(0xFFFFFBEB)
+                        }
+                        val diagBorder = when {
+                            !autoBackupEnabled -> Color(0xFFCBD5E1)
+                            backupDiag.isHealthy -> Color(0xFF6EE7B7)
+                            else -> Color(0xFFFCD34D)
+                        }
+                        val diagTitleColor = when {
+                            !autoBackupEnabled -> Color(0xFF475569)
+                            backupDiag.isHealthy -> Color(0xFF065F46)
+                            else -> Color(0xFF92400E)
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = diagBg,
+                            border = BorderStroke(1.dp, diagBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                        Icon(
+                                            imageVector = if (backupDiag.isHealthy && autoBackupEnabled) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                            contentDescription = null,
+                                            tint = diagTitleColor,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = when {
+                                                !autoBackupEnabled -> "⏸️ ऑटो-बैकअप बंद (OFF) है — चालू करने के लिए ऊपर स्विच ऑन करें"
+                                                backupDiag.isHealthy -> "✅ ऑटो-बैकअप सही से सेट है (Ready)"
+                                                else -> "⚠️ ऑटो-बैकअप में सुधार ज़रूरी (${backupDiag.issues.size} समस्या)"
+                                            },
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 11.5.sp,
+                                            color = diagTitleColor
+                                        )
+                                    }
+                                    Text(
+                                        text = "🔄 जांचें",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = activeTheme.primary,
+                                        modifier = Modifier
+                                            .clickable { diagRefreshKey++ }
+                                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                                    )
+                                }
+
+                                if (autoBackupEnabled) {
+                                    Text(
+                                        text = "• अलार्म स्टेटस: " + if (backupDiag.isAlarmRegistered) {
+                                            "✔ सक्रिय — अगला बैकअप: ${backupDiag.nextTriggerDisplay}"
+                                        } else {
+                                            "❌ अलार्म सेट नहीं (नीचे 'सेव करें' दबाएं)"
+                                        },
+                                        fontSize = 10.5.sp,
+                                        color = if (backupDiag.isAlarmRegistered) Color(0xFF065F46) else Color(0xFFB91C1C)
+                                    )
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "• बैटरी मोड: " + if (backupDiag.isBatteryOptimizationIgnored) {
+                                                "✔ Unrestricted (बंद ऐप में भी चलेगा)"
+                                            } else {
+                                                "⚠️ Restricted (बंद ऐप में रुक सकता है)"
+                                            },
+                                            fontSize = 10.5.sp,
+                                            color = if (backupDiag.isBatteryOptimizationIgnored) Color(0xFF065F46) else Color(0xFFB45309),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (!backupDiag.isBatteryOptimizationIgnored) {
+                                            Text(
+                                                text = "ठीक करें ▶",
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFB45309),
+                                                modifier = Modifier
+                                                    .clickable {
+                                                        try {
+                                                            context.startActivity(
+                                                                Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                                            )
+                                                        } catch (_: Exception) {
+                                                            try {
+                                                                val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                                                    data = Uri.parse("package:${context.packageName}")
+                                                                }
+                                                                context.startActivity(intent)
+                                                            } catch (_: Exception) {}
+                                                        }
+                                                    }
+                                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = "• नोटिफिकेशन: " + if (backupDiag.isNotificationPermissionGranted) "✔ चालू" else "⚠️ बंद (अनुमति दें)",
+                                            fontSize = 10.5.sp,
+                                            color = if (backupDiag.isNotificationPermissionGranted) Color(0xFF065F46) else Color(0xFFB45309),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (!backupDiag.isNotificationPermissionGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                            Text(
+                                                text = "अनुमति दें ▶",
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFB45309),
+                                                modifier = Modifier
+                                                    .clickable {
+                                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                                        diagRefreshKey++
+                                                    }
+                                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Text(
+                                        text = "• फ़ोल्डर: ${backupDiag.folderSummary}" + if (backupDiag.isDriveWebhookConfigured) " + ☁️ Drive लिंक सेट" else "",
+                                        fontSize = 10.5.sp,
+                                        color = Color(0xFF334155)
+                                    )
+                                }
+
+                                // Last Run Result History
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = Color.White,
+                                    border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
+                                        val lastBadge = when (backupDiag.lastRunSuccess) {
+                                            true -> "✅ सफल"
+                                            false -> "❌ विफल"
+                                            null -> "⏳ अभी तक नहीं चला"
+                                        }
+                                        val srcLabel = when (backupDiag.lastRunSource) {
+                                            "AUTO_SCHEDULED" -> "ऑटो-अलार्म"
+                                            "ONE_MIN_TEST" -> "1-मिनट टेस्ट"
+                                            "MANUAL_TEST" -> "मैन्युअल टेस्ट"
+                                            else -> ""
+                                        }
+                                        Text(
+                                            text = "आखिरी बैकअप: ${backupDiag.lastRunTimeDisplay} • $lastBadge" +
+                                                    (if (srcLabel.isNotBlank()) " ($srcLabel)" else "") +
+                                                    (if (backupDiag.lastBackupSizeKb > 0) " • ${backupDiag.lastBackupSizeKb} KB" else ""),
+                                            fontSize = 10.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = when (backupDiag.lastRunSuccess) {
+                                                true -> Color(0xFF15803D)
+                                                false -> Color(0xFFDC2626)
+                                                null -> Color(0xFF475569)
+                                            }
+                                        )
+                                        if (backupDiag.lastRunMessage.isNotBlank()) {
+                                            Text(
+                                                text = backupDiag.lastRunMessage,
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF475569)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (autoBackupEnabled && backupDiag.issues.isNotEmpty()) {
+                                    backupDiag.issues.forEach { issue ->
+                                        Text(
+                                            text = "⚡ $issue",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFFB45309)
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         if (autoBackupEnabled) {
                             HorizontalDivider(color = Color(0xFFE2E8F0))
 
+                            // Custom Mobile Folder Selection Section
                             Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = Color(0xFFEFF6FF),
-                                border = BorderStroke(1.dp, Color(0xFFBFDBFE)),
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFFF8FAFC),
+                                border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF2563EB), modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
                                     Text(
-                                        text = "फ़ाइल का नाम: dd_MM_yyyy_backup_data.json (उदा. 01_11_2026_backup_data.json)। इसमें सभी टाइल फोटो, स्टॉक, बिल और सेटिंग्स संचयी रूप से सुरक्षित रहते हैं।",
-                                        fontSize = 10.5.sp,
-                                        color = Color(0xFF1E40AF)
+                                        text = "📁 कस्टम मोबाइल बैकअप फ़ोल्डर (Mobile Folder):",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF1E293B)
                                     )
+
+                                    OutlinedTextField(
+                                        value = backupFolderName,
+                                        onValueChange = { backupFolderName = it },
+                                        label = { Text("मोबाइल फ़ोल्डर नाम (Downloads के अंदर)") },
+                                        placeholder = { Text("TilesAndMarbles_Backups") },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        supportingText = {
+                                            Text(
+                                                "फ़ाइल सेव लोकेशन: Downloads/${com.example.util.BackgroundScheduler.sanitizeFolderName(backupFolderName)}/",
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    )
+
+                                    val readableSaf = com.example.util.BackgroundScheduler.getReadableSafFolderName(backupFolderUri)
+                                    if (readableSaf.isNotBlank()) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = Color(0xFFEFF6FF),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                text = "✔ चयनित कस्टम फ़ोल्डर: $readableSaf",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF1D4ED8),
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = { backupFolderPickerLauncher.launch(null) },
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("pick_custom_backup_folder_button")
+                                    ) {
+                                        Icon(imageVector = Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (readableSaf.isBlank()) "📁 मोबाइल का कोई भी कस्टम फ़ोल्डर चुनें" else "📁 कस्टम मोबाइल फ़ोल्डर बदलें",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
                                 }
                             }
 
@@ -1464,8 +1939,8 @@ fun SettingsScreen(
                                 OutlinedTextField(
                                     value = backupScheduledTime,
                                     onValueChange = { backupScheduledTime = it },
-                                    label = { Text("बैकअप का समय (24H)") },
-                                    placeholder = { Text("20:00 (शाम 8 बजे)") },
+                                    label = { Text("बैकअप समय (24H)") },
+                                    placeholder = { Text("20:00") },
                                     singleLine = true,
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.weight(1f),
@@ -1476,11 +1951,11 @@ fun SettingsScreen(
                                     value = backupFromDateString,
                                     onValueChange = { backupFromDateString = it },
                                     label = { Text("डेटा प्रारंभिक तारीख") },
-                                    placeholder = { Text("dd/MM/yyyy उदा. 01/10/2026") },
+                                    placeholder = { Text("dd/MM/yyyy") },
                                     singleLine = true,
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.weight(1.3f),
-                                    supportingText = { Text("इस तारीख से आगे का संचयी डेटा", fontSize = 10.sp) }
+                                    supportingText = { Text("खाली छोड़ें = पूरा डेटा", fontSize = 10.sp) }
                                 )
                             }
 
@@ -1493,8 +1968,206 @@ fun SettingsScreen(
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.fillMaxWidth(),
-                                supportingText = { Text("बैकअप इस ईमेल / ड्राइव खाते पर भेजा जाएगा", fontSize = 10.sp) }
+                                supportingText = { Text("बैकअप इस ईमेल / Google Drive खाते पर भेजा जाएगा", fontSize = 10.sp) }
                             )
+
+                            // Optional Unattended Google Drive Apps Script Webhook (100% Automatic Background Drive + Email Upload!)
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFFF5F3FF),
+                                border = BorderStroke(1.dp, Color(0xFFDDD6FE)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { showDriveWebhookGuide = !showDriveWebhookGuide }
+                                    ) {
+                                        Text(
+                                            text = "☁️ Google Drive ऑटो-अपलोड लिंक (ऐप बंद होने पर भी)",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF5B21B6),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Text(
+                                            text = if (showDriveWebhookGuide) "छिपाएं ▲" else "सेटअप ▼",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF6D28D9)
+                                        )
+                                    }
+
+                                    OutlinedTextField(
+                                        value = driveWebhookUrl,
+                                        onValueChange = { driveWebhookUrl = it },
+                                        label = { Text("Google Drive Apps Script URL (Optional)") },
+                                        placeholder = { Text("https://script.google.com/macros/s/.../exec") },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+
+                                    if (showDriveWebhookGuide) {
+                                        Text(
+                                            text = "1. script.google.com खोलें (अपनी Gmail ID से)\n2. नीचे 'कोड कॉपी करें' दबाएं और पेस्ट करें\n3. Deploy → New Deployment → Web App → Anyone → Deploy करें और लिंक ऊपर पेस्ट करें। इसके बाद ऐप बंद होने पर भी बैकअप सीधे आपके Google Drive + Gmail पर अपने आप चला जाएगा!",
+                                            fontSize = 10.5.sp,
+                                            color = Color(0xFF4C1D95)
+                                        )
+                                        OutlinedButton(
+                                            onClick = {
+                                                val script = com.example.util.BackgroundScheduler.getGoogleDriveAppsScriptTemplate(
+                                                    folderName = backupFolderName,
+                                                    targetEmail = backupTargetEmail
+                                                )
+                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                clipboard?.setPrimaryClip(ClipData.newPlainText("Google Drive Auto Backup Script", script))
+                                                viewModel.showMessage("✔ Google Drive Apps Script कोड कॉपी हो गया!")
+                                            },
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Icon(imageVector = Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Google Drive Apps Script कोड कॉपी करें", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Save & Schedule Button right inside Auto-Backup card
+                            Button(
+                                onClick = {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                    viewModel.saveAutoBackupSettingsOnly(
+                                        autoBackupEnabled = autoBackupEnabled,
+                                        backupScheduledTime = backupScheduledTime,
+                                        backupFromDateString = backupFromDateString,
+                                        backupTargetEmail = backupTargetEmail,
+                                        backupFolderUri = backupFolderUri,
+                                        backupFolderName = backupFolderName,
+                                        driveWebhookUrl = driveWebhookUrl
+                                    )
+                                    diagRefreshKey++
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("save_auto_backup_schedule_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp), tint = PureWhite)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("💾 ऑटो-बैकअप टाइम, फ़ोल्डर व Drive सेटिंग सेव करें", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                            }
+
+                            // TRY & TEST BUTTONS ROW (Instant Try + 1-Min Real Background Alarm Test)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Button(
+                                    onClick = {
+                                        if (isRunningAutoBackupTest) return@Button
+                                        isRunningAutoBackupTest = true
+                                        lastLiveTestSummary = "⏳ बैकअप टेस्ट चल रहा है..."
+                                        viewModel.saveAutoBackupSettingsOnly(
+                                            autoBackupEnabled = autoBackupEnabled,
+                                            backupScheduledTime = backupScheduledTime,
+                                            backupFromDateString = backupFromDateString,
+                                            backupTargetEmail = backupTargetEmail,
+                                            backupFolderUri = backupFolderUri,
+                                            backupFolderName = backupFolderName,
+                                            driveWebhookUrl = driveWebhookUrl
+                                        )
+                                        viewModel.runAutoBackupToFolderAndDriveNow { res ->
+                                            isRunningAutoBackupTest = false
+                                            lastLiveTestSummary = if (res.success) {
+                                                val extra = if (res.driveUploadMessage.isNotBlank()) " • ${res.driveUploadMessage}" else ""
+                                                "✅ टेस्ट सफल: ${res.mobileFolderMessage}$extra"
+                                            } else {
+                                                "❌ टेस्ट विफल: ${res.errorMessage ?: "अज्ञात त्रुटि"}"
+                                            }
+                                            diagRefreshKey++
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E)),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("test_auto_backup_now_button")
+                                ) {
+                                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(15.dp), tint = PureWhite)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(if (isRunningAutoBackupTest) "टेस्ट हो रहा..." else "🧪 अभी ट्राई करें", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        }
+                                        viewModel.saveAutoBackupSettingsOnly(
+                                            autoBackupEnabled = autoBackupEnabled,
+                                            backupScheduledTime = backupScheduledTime,
+                                            backupFromDateString = backupFromDateString,
+                                            backupTargetEmail = backupTargetEmail,
+                                            backupFolderUri = backupFolderUri,
+                                            backupFolderName = backupFolderName,
+                                            driveWebhookUrl = driveWebhookUrl
+                                        )
+                                        viewModel.scheduleOneMinuteAutoBackupTest { triggerMs ->
+                                            val tStr = SimpleDateFormat("hh:mm:ss a", Locale.ENGLISH).format(Date(triggerMs))
+                                            oneMinTestScheduledText = "⏱️ 1-मिनट ऑटो-टेस्ट अलार्म $tStr के लिए सेट है — अब ऐप बंद करके देखें, 60 सेकंड में अपने आप बैकअप नोटिफिकेशन आएगा!"
+                                            diagRefreshKey++
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("test_auto_backup_1min_button")
+                                ) {
+                                    Text("⏱️ 1 मिनट ऑटो-टेस्ट", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+
+                            if (!lastLiveTestSummary.isNullOrBlank()) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (lastLiveTestSummary!!.startsWith("✅")) Color(0xFFDCFCE7) else Color(0xFFFEF2F2),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = lastLiveTestSummary!!,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (lastLiveTestSummary!!.startsWith("✅")) Color(0xFF166534) else Color(0xFF991B1B),
+                                        modifier = Modifier.padding(8.dp)
+                                    )
+                                }
+                            }
+
+                            if (!oneMinTestScheduledText.isNullOrBlank()) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0xFFEFF6FF),
+                                    border = BorderStroke(1.dp, Color(0xFFBFDBFE)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = oneMinTestScheduledText!!,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFF1E40AF),
+                                        modifier = Modifier.padding(8.dp)
+                                    )
+                                }
+                            }
 
                             Button(
                                 onClick = {
@@ -1504,9 +2177,9 @@ fun SettingsScreen(
                                 shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(imageVector = Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Icon(imageVector = Icons.Default.Send, contentDescription = null, modifier = Modifier.size(15.dp), tint = PureWhite)
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("📤 ड्राइव / ईमेल पर अभी बैकअप भेजें (Share Now)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text("📤 अभी Google Drive / Email पर भेजें", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = PureWhite)
                             }
                         }
                     }
@@ -2073,6 +2746,156 @@ fun SettingsScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary)
                 ) {
                     Text("ठीक है (Done)")
+                }
+            }
+        )
+    }
+
+    // Add New Tile Location Dialog
+    if (showAddLocationDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddLocationDialog = false },
+            title = {
+                Text(
+                    text = "📍 नई टाइल लोकेशन जोड़ें",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    color = activeTheme.primary
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "यहाँ जो लोकेशन आप जोड़ेंगे (जैसे गोदाम, वेयरहाउस, दुकान, रैक-A), वही टाइल जोड़ते/एडिट करते समय चुनने के लिए दिखेगी।",
+                        fontSize = 12.sp,
+                        color = Color(0xFF64748B)
+                    )
+                    OutlinedTextField(
+                        value = newLocationNameInput,
+                        onValueChange = { newLocationNameInput = it },
+                        label = { Text("लोकेशन का नाम *") },
+                        placeholder = { Text("उदा. बड़ा गोदाम, दुकान-1, वेयरहाउस") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("input_new_tile_location")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (newLocationNameInput.isNotBlank()) {
+                            viewModel.addTileLocation(newLocationNameInput) { ok ->
+                                if (ok) showAddLocationDialog = false
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary)
+                ) {
+                    Text("जोड़ें (Save)", color = PureWhite, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showAddLocationDialog = false }) {
+                    Text("रद्द करें")
+                }
+            }
+        )
+    }
+
+    // Rename Tile Location Dialog (Auto-updates all tiles with this location)
+    if (renamingLocation != null) {
+        val targetLoc = renamingLocation!!
+        val affectedCount = products.count { it.location.equals(targetLoc.name, ignoreCase = true) }
+        AlertDialog(
+            onDismissRequest = { renamingLocation = null },
+            title = {
+                Text(
+                    text = "✏️ लोकेशन का नाम बदलें",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    color = activeTheme.primary
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        color = Color(0xFFEFF6FF),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "ℹ️ नाम बदलने पर इस लोकेशन की सभी टाइलों ($affectedCount टाइलें) में नया नाम अपने आप अपडेट हो जाएगा!",
+                            fontSize = 11.5.sp,
+                            color = Color(0xFF1E40AF),
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = renameLocationInput,
+                        onValueChange = { renameLocationInput = it },
+                        label = { Text("नया लोकेशन नाम *") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("input_rename_tile_location")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (renameLocationInput.isNotBlank()) {
+                            viewModel.renameTileLocation(targetLoc.id, renameLocationInput) { ok ->
+                                if (ok) renamingLocation = null
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary)
+                ) {
+                    Text("नाम बदलें (Update All)", color = PureWhite, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { renamingLocation = null }) {
+                    Text("रद्द करें")
+                }
+            }
+        )
+    }
+
+    // Delete Tile Location Confirmation Dialog
+    if (deletingLocation != null) {
+        val targetLoc = deletingLocation!!
+        val affectedCount = products.count { it.location.equals(targetLoc.name, ignoreCase = true) }
+        AlertDialog(
+            onDismissRequest = { deletingLocation = null },
+            icon = {
+                Icon(imageVector = Icons.Default.Warning, contentDescription = null, tint = StatusError)
+            },
+            title = { Text("लोकेशन हटाएं?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    text = "क्या आप '${targetLoc.name}' लोकेशन हटाना चाहते हैं?" +
+                            if (affectedCount > 0) "\n\nइस लोकेशन पर जुड़ी $affectedCount टाइलों से लोकेशन खाली हो जाएगी (टाइलें डिलीट नहीं होंगी)।" else "",
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteTileLocation(targetLoc.id)
+                        deletingLocation = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = StatusError)
+                ) {
+                    Text("हटाएं (Delete)", color = PureWhite)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { deletingLocation = null }) {
+                    Text("रद्द करें")
                 }
             }
         )

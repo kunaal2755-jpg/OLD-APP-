@@ -40,12 +40,17 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Inventory
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import com.example.util.CatalogPdfConfig
 import com.example.util.ShareHelper
 import com.example.util.TileSampleCatalogPdfGenerator
@@ -71,9 +76,16 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -105,29 +117,39 @@ fun InventoryScreen(
 ) {
     val products by viewModel.products.collectAsStateWithLifecycle()
     val sizePricings by viewModel.sizePricings.collectAsStateWithLifecycle()
+    val tileLocations by viewModel.tileLocations.collectAsStateWithLifecycle()
     val settings by viewModel.shopSettings.collectAsStateWithLifecycle()
     val activeTheme = getAppThemeOption(settings.appTheme)
 
     var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf("ALL") } // "ALL", "LOW_STOCK", or size name
+    var selectedFilter by remember { mutableStateOf("ALL") } // "ALL", "LOW_STOCK", "LOC:<name>", or size name
     var showAddEditDialog by remember { mutableStateOf(false) }
     var editingProduct by remember { mutableStateOf<TileProduct?>(null) }
     var productToDelete by remember { mutableStateOf<TileProduct?>(null) }
 
     // Tile Sample Catalog PDF States
     var showSampleCatalogDialog by remember { mutableStateOf(false) }
+    var isGeneratingCatalogPdf by remember { mutableStateOf(false) }
+    var showPdfSizeRulesDialog by remember { mutableStateOf(false) }
     var generatedCatalogPdfFile by remember { mutableStateOf<File?>(null) }
     var showCatalogPdfPreview by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     val filteredProducts = products.filter { prod ->
         val matchesQuery = searchQuery.isBlank() ||
                 prod.name.contains(searchQuery, ignoreCase = true) ||
                 prod.code.contains(searchQuery, ignoreCase = true) ||
-                prod.size.contains(searchQuery, ignoreCase = true)
+                prod.size.contains(searchQuery, ignoreCase = true) ||
+                prod.location.contains(searchQuery, ignoreCase = true)
 
-        val matchesFilter = when (selectedFilter) {
-            "ALL" -> true
-            "LOW_STOCK" -> prod.isLowStock
+        val matchesFilter = when {
+            selectedFilter == "ALL" -> true
+            selectedFilter == "LOW_STOCK" -> prod.isLowStock
+            selectedFilter.startsWith("LOC:") -> {
+                val targetLoc = selectedFilter.removePrefix("LOC:")
+                if (targetLoc == "__NONE__") prod.location.isBlank()
+                else prod.location.equals(targetLoc, ignoreCase = true)
+            }
             else -> prod.size.equals(selectedFilter, ignoreCase = true)
         }
 
@@ -261,7 +283,7 @@ fun InventoryScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("Search by tile name, code (e.g. MTM-101), or size...") },
+                placeholder = { Text("नाम, कोड, साइज़ या लोकेशन (Godown/Dukaan) खोजें...") },
                 leadingIcon = { Icon(imageVector = Icons.Default.Search, contentDescription = null) },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
@@ -312,6 +334,15 @@ fun InventoryScreen(
                         label = { Text(size) }
                     )
                 }
+                items(tileLocations) { loc ->
+                    val locKey = "LOC:${loc.name}"
+                    val locCount = products.count { it.location.equals(loc.name, ignoreCase = true) }
+                    FilterChip(
+                        selected = selectedFilter == locKey,
+                        onClick = { selectedFilter = locKey },
+                        label = { Text("📍 ${loc.name} ($locCount)") }
+                    )
+                }
             }
 
             if (filteredProducts.isEmpty()) {
@@ -358,8 +389,12 @@ fun InventoryScreen(
         AddEditTileDialog(
             product = editingProduct,
             sizePricings = sizePricings.map { it.sizeName },
+            locations = tileLocations.map { it.name },
+            onQuickAddLocation = { newLocName ->
+                viewModel.addTileLocation(newLocName)
+            },
             onDismiss = { showAddEditDialog = false },
-            onSave = { id, code, name, size, photoUri, desc, piecesPerBox, totalPieces, sellingPrice, cost ->
+            onSave = { id, code, name, size, photoUri, desc, piecesPerBox, totalPieces, sellingPrice, cost, location ->
                 viewModel.saveProduct(
                     id = id,
                     code = code,
@@ -371,6 +406,7 @@ fun InventoryScreen(
                     stockPieces = totalPieces,
                     defaultSellingPrice = sellingPrice,
                     purchaseCost = cost,
+                    location = location,
                     onSuccess = { showAddEditDialog = false },
                     onError = { viewModel.showMessage(it) }
                 )
@@ -428,18 +464,93 @@ fun InventoryScreen(
         val context = LocalContext.current
         TileSampleCatalogConfigDialog(
             sizesList = availableSizes,
+            primaryColor = activeTheme.primary,
             onDismiss = { showSampleCatalogDialog = false },
+            onOpenPerSizeRules = { showPdfSizeRulesDialog = true },
             onGenerate = { config ->
                 showSampleCatalogDialog = false
-                val pdfFile = TileSampleCatalogPdfGenerator.generateCatalogPdf(
-                    context = context,
-                    settings = settings,
-                    products = products,
-                    config = config
-                )
-                generatedCatalogPdfFile = pdfFile
-                showCatalogPdfPreview = true
+                if (isGeneratingCatalogPdf) return@TileSampleCatalogConfigDialog
+                isGeneratingCatalogPdf = true
+                val productsSnapshot = products.toList()
+                val settingsSnapshot = settings
+                coroutineScope.launch {
+                    try {
+                        val pdfFile = withContext(Dispatchers.IO) {
+                            TileSampleCatalogPdfGenerator.generateCatalogPdf(
+                                context = context.applicationContext,
+                                settings = settingsSnapshot,
+                                products = productsSnapshot,
+                                config = config
+                            )
+                        }
+                        generatedCatalogPdfFile = pdfFile
+                        showCatalogPdfPreview = true
+                    } catch (t: Throwable) {
+                        viewModel.showMessage("PDF बनाने में त्रुटि: ${t.localizedMessage ?: "कृपया दोबारा प्रयास करें"}")
+                    } finally {
+                        isGeneratingCatalogPdf = false
+                    }
+                }
             }
+        )
+    }
+
+    // Per-Size PDF Display Customization Modal (accessible directly from Inventory PDF dialog)
+    if (showPdfSizeRulesDialog) {
+        AlertDialog(
+            onDismissRequest = { showPdfSizeRulesDialog = false },
+            title = {
+                Text(
+                    text = "2X4, 12X18 — PDF साइज़ व इमेज नियम",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+            },
+            text = {
+                Box(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    com.example.ui.components.PdfSizeCustomizationSection(
+                        configJson = settings.pdfSizeDisplayConfigJson,
+                        availableSizes = availableSizes,
+                        primaryColor = activeTheme.primary,
+                        accentColor = activeTheme.accent,
+                        onSaveConfigJson = { json -> viewModel.savePdfSizeDisplayConfig(json) }
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showPdfSizeRulesDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary)
+                ) {
+                    Text("हो गया (Done)", color = PureWhite)
+                }
+            }
+        )
+    }
+
+    // Loading Dialog while PDF generates on background thread (prevents ANR & crash)
+    if (isGeneratingCatalogPdf) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("PDF कैटलॉग बन रहा है...", fontWeight = FontWeight.Bold, fontSize = 15.sp) },
+            text = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.padding(vertical = 6.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = activeTheme.primary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Text(
+                        text = "सभी टाइल्स व उनकी फोटो सुरक्षित तरीके से PDF में जोड़ी जा रही हैं। कृपया प्रतीक्षा करें...",
+                        fontSize = 12.sp,
+                        color = Color(0xFF334155)
+                    )
+                }
+            },
+            confirmButton = {}
         )
     }
 
@@ -451,8 +562,20 @@ fun InventoryScreen(
             pdfFile = pdfFile,
             shopName = settings.shopName.ifBlank { "Mourya Tiles" },
             onDismiss = { showCatalogPdfPreview = false },
-            onOpenPdf = { ShareHelper.viewPdf(context, pdfFile) },
-            onSharePdf = { ShareHelper.sharePdf(context, pdfFile, "Tile Sample Catalog - ${settings.shopName}") }
+            onOpenPdf = {
+                try {
+                    ShareHelper.viewPdf(context, pdfFile)
+                } catch (t: Throwable) {
+                    viewModel.showMessage("PDF खोलने के लिए कोई PDF Viewer ऐप इंस्टॉल करें")
+                }
+            },
+            onSharePdf = {
+                try {
+                    ShareHelper.sharePdf(context, pdfFile, "Tile Sample Catalog - ${settings.shopName}")
+                } catch (t: Throwable) {
+                    viewModel.showMessage("PDF शेयर करने में त्रुटि: ${t.localizedMessage ?: ""}")
+                }
+            }
         )
     }
 }
@@ -556,7 +679,31 @@ private fun TileProductCard(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Storage Location Badge (shows set location or prompt to add)
+                if (product.location.isNotBlank()) {
+                    Surface(
+                        color = Color(0xFFECFDF5),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "📍 ${product.location}",
+                            color = Color(0xFF047857),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                } else {
+                    Text(
+                        text = "📍 लोकेशन नहीं चुनी गई (Edit से जोड़ें)",
+                        fontSize = 9.5.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
 
                 // Stock Display
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -639,6 +786,8 @@ private fun TileProductCard(
 private fun AddEditTileDialog(
     product: TileProduct?,
     sizePricings: List<String>,
+    locations: List<String>,
+    onQuickAddLocation: (String) -> Unit,
     onDismiss: () -> Unit,
     onSave: (
         id: Long,
@@ -650,7 +799,8 @@ private fun AddEditTileDialog(
         piecesPerBox: Int,
         totalPieces: Int,
         sellingPrice: Double,
-        purchaseCost: Double
+        purchaseCost: Double,
+        location: String
     ) -> Unit,
     onSuggestPrice: (String) -> Double?,
     onSuggestPacking: (String) -> Int? = { null },
@@ -662,6 +812,9 @@ private fun AddEditTileDialog(
     var size by remember { mutableStateOf(product?.size ?: "12x18") }
     var photoUri by remember { mutableStateOf(product?.photoUri) }
     var description by remember { mutableStateOf(product?.description ?: "") }
+    var selectedLocation by remember { mutableStateOf(product?.location ?: "") }
+    var showInlineAddLoc by remember { mutableStateOf(false) }
+    var inlineLocName by remember { mutableStateOf("") }
     var piecesPerBoxStr by remember { mutableStateOf(product?.piecesPerBox?.toString() ?: "5") }
     var boxesStockStr by remember { mutableStateOf(if (product != null) product.fullBoxes.toString() else "50") }
     var looseStockStr by remember { mutableStateOf(if (product != null && product.loosePieces > 0) product.loosePieces.toString() else "") }
@@ -903,6 +1056,113 @@ private fun AddEditTileDialog(
                     maxLines = 2,
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Tile Storage Location Selector (Settings locations + Quick Add)
+                Surface(
+                    color = Color(0xFFF8FAFC),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "📍 टाइल कहाँ रखी है (Location)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Navy900
+                            )
+                            TextButton(
+                                onClick = { showInlineAddLoc = !showInlineAddLoc },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                modifier = Modifier.height(26.dp)
+                            ) {
+                                Text(
+                                    text = if (showInlineAddLoc) "बंद करें" else "+ नई लोकेशन",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        if (showInlineAddLoc) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = inlineLocName,
+                                    onValueChange = { inlineLocName = it },
+                                    placeholder = { Text("जैसे: गोदाम-2", fontSize = 11.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Button(
+                                    onClick = {
+                                        val clean = inlineLocName.trim()
+                                        if (clean.isNotEmpty()) {
+                                            onQuickAddLocation(clean)
+                                            selectedLocation = clean
+                                            inlineLocName = ""
+                                            showInlineAddLoc = false
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Navy900),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text("जोड़ें", fontSize = 11.sp, color = PureWhite)
+                                }
+                            }
+                        }
+
+                        val allLocChoices = remember(locations, selectedLocation) {
+                            buildList {
+                                add("")
+                                locations.forEach { if (!contains(it)) add(it) }
+                                if (selectedLocation.isNotBlank() && !contains(selectedLocation)) add(selectedLocation)
+                            }
+                        }
+
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.padding(top = 4.dp)
+                        ) {
+                            items(allLocChoices) { locOption ->
+                                val isSel = selectedLocation.equals(locOption, ignoreCase = true)
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isSel) Color(0xFF047857) else Color(0xFFE2E8F0),
+                                    modifier = Modifier.clickable { selectedLocation = locOption }
+                                ) {
+                                    Text(
+                                        text = if (locOption.isBlank()) "कोई नहीं (None)" else "📍 $locOption",
+                                        color = if (isSel) PureWhite else Color(0xFF334155),
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = "सेटिंग्स में लोकेशन का नाम बदलने पर यहाँ भी अपने आप बदल जाएगा।",
+                            fontSize = 9.5.sp,
+                            color = Color(0xFF64748B),
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
@@ -925,7 +1185,8 @@ private fun AddEditTileDialog(
                         ppb,
                         totalPieces,
                         sellingPrice,
-                        cost
+                        cost,
+                        selectedLocation
                     )
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Navy900),
@@ -945,7 +1206,9 @@ private fun AddEditTileDialog(
 @Composable
 private fun TileSampleCatalogConfigDialog(
     sizesList: List<String>,
+    primaryColor: Color,
     onDismiss: () -> Unit,
+    onOpenPerSizeRules: () -> Unit,
     onGenerate: (CatalogPdfConfig) -> Unit
 ) {
     var showPhoto by remember { mutableStateOf(true) }
@@ -957,6 +1220,10 @@ private fun TileSampleCatalogConfigDialog(
     var showQualityAndDescription by remember { mutableStateOf(true) }
     var showPrice by remember { mutableStateOf(true) }
     var selectedCategory by remember { mutableStateOf("ALL") }
+    var itemsPerPage by remember { mutableIntStateOf(4) }
+    var imageHeightPercent by remember { mutableFloatStateOf(100f) }
+    var imageWidthPercent by remember { mutableFloatStateOf(100f) }
+    var imageFitOverride by remember { mutableStateOf("RULE") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -976,7 +1243,7 @@ private fun TileSampleCatalogConfigDialog(
                         fontSize = 15.sp
                     )
                     Text(
-                        text = "चुनें कि PDF में क्या-क्या विवरण दिखाना है",
+                        text = "इमेज साइज़, पेज लेआउट और विवरण कस्टमाइज़ करें",
                         fontSize = 11.sp,
                         color = Color(0xFF64748B)
                     )
@@ -990,7 +1257,7 @@ private fun TileSampleCatalogConfigDialog(
             ) {
                 // Category / Size Selector
                 Text(
-                    text = "टाइल श्रेणी / साइज़ चुनें (Select Category):",
+                    text = "1. टाइल श्रेणी / साइज़ चुनें (Select Category):",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF1E293B)
@@ -1015,9 +1282,155 @@ private fun TileSampleCatalogConfigDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
+                HorizontalDivider(color = Color(0xFFE2E8F0))
+
+                // Enhanced PDF Image Size & Layout Customization Section
                 Text(
-                    text = "PDF में क्या-क्या विवरण दिखाएं (Details to Display):",
+                    text = "2. PDF में इमेज साइज़ व पेज लेआउट (Image Size Customizer):",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = primaryColor
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFF8FAFC),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, primaryColor.copy(alpha = 0.25f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        // Tiles Per Page chips
+                        Text(
+                            text = "एक पेज पर कितनी टाइल्स (Tiles Per Page):",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF334155)
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            listOf(
+                                2 to "2 बड़ी फोटो",
+                                4 to "4 मानक",
+                                6 to "6 कॉम्पैक्ट"
+                            ).forEach { (count, label) ->
+                                FilterChip(
+                                    selected = itemsPerPage == count,
+                                    onClick = { itemsPerPage = count },
+                                    label = { Text(label, fontSize = 10.sp) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        // Live Visual Preview of Image Size Sliders
+                        val previewW = (96f * (imageWidthPercent / 100f)).coerceIn(48f, 130f)
+                        val previewH = (56f * (imageHeightPercent / 100f)).coerceIn(30f, 84f)
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(92.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(PureWhite)
+                                .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(8.dp))
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(width = previewW.dp, height = previewH.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(primaryColor.copy(alpha = 0.85f))
+                                    .border(1.dp, Color(0xFF94A3B8), RoundedCornerShape(6.dp))
+                            ) {
+                                Text(
+                                    text = "फोटो ${imageWidthPercent.roundToInt()}% × ${imageHeightPercent.roundToInt()}%",
+                                    color = PureWhite,
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        // Image Height Slider
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("इमेज ऊंचाई (Height):", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Text("${imageHeightPercent.roundToInt()}%", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = primaryColor)
+                        }
+                        Slider(
+                            value = imageHeightPercent,
+                            onValueChange = { imageHeightPercent = it },
+                            valueRange = 60f..150f,
+                            steps = 8,
+                            colors = SliderDefaults.colors(thumbColor = primaryColor, activeTrackColor = primaryColor)
+                        )
+
+                        // Image Width Slider
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("इमेज चौड़ाई / ज़ूम (Width Scale):", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Text("${imageWidthPercent.roundToInt()}%", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = primaryColor)
+                        }
+                        Slider(
+                            value = imageWidthPercent,
+                            onValueChange = { imageWidthPercent = it },
+                            valueRange = 60f..120f,
+                            steps = 5,
+                            colors = SliderDefaults.colors(thumbColor = primaryColor, activeTrackColor = primaryColor)
+                        )
+
+                        // Image Fit Mode Override
+                        Text(
+                            text = "फोटो फिट तरीका (Photo Fit Mode):",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF334155)
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            listOf(
+                                "RULE" to "सेटिंग अनुसार",
+                                "FIT_BOX" to "पूरा फिट",
+                                "CENTER_CROP" to "क्रॉप फिट"
+                            ).forEach { (key, label) ->
+                                FilterChip(
+                                    selected = imageFitOverride == key,
+                                    onClick = { imageFitOverride = key },
+                                    label = { Text(label, fontSize = 9.5.sp) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+
+                        // Quick button to edit per-size rules (2X4, 12X18, etc.)
+                        OutlinedButton(
+                            onClick = onOpenPerSizeRules,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("catalog_per_size_rules_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.AspectRatio, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("2X4, 12X18 अलग-अलग साइज़ नियम सेट करें", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "3. PDF में क्या-क्या विवरण दिखाएं (Details to Display):",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF1E293B)
@@ -1095,12 +1508,17 @@ private fun TileSampleCatalogConfigDialog(
                             showPiecesPerBox = showPiecesPerBox,
                             showQualityAndDescription = showQualityAndDescription,
                             showPrice = showPrice,
-                            selectedCategory = selectedCategory
+                            selectedCategory = selectedCategory,
+                            itemsPerPage = itemsPerPage,
+                            imageHeightPercent = imageHeightPercent.roundToInt(),
+                            imageWidthPercent = imageWidthPercent.roundToInt(),
+                            imageFitOverride = imageFitOverride
                         )
                     )
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F766E)),
-                shape = RoundedCornerShape(8.dp)
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.testTag("generate_catalog_pdf_confirm_button")
             ) {
                 Icon(imageVector = Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))

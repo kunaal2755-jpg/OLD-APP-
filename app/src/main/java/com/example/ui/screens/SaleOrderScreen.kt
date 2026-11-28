@@ -85,7 +85,10 @@ import com.example.data.model.OrderItemEntity
 import com.example.data.model.TileProduct
 import com.example.ui.MainViewModel
 import com.example.ui.Screen
-import com.example.ui.components.PdfPriceVisibilitySwitchCard
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import com.example.ui.components.PdfDisplaySwitchesCard
 import com.example.ui.theme.BlueAccent
 import com.example.ui.theme.Navy900
 import com.example.ui.theme.PureWhite
@@ -100,16 +103,58 @@ data class DraftOrderItem(
     var fullBoxes: Int = 1,
     var loosePieces: Int = 0,
     var pricePerBox: Double = 0.0,
-    var isPremiumHighlighter: Boolean = false
+    var isPremiumHighlighter: Boolean = false,
+    val itemType: String = "TILE", // "TILE", "MARBLE", "MANUAL"
+    val marbleLength: Double = 0.0,
+    val marbleWidth: Double = 0.0,
+    val marbleUnit: String = "INCH", // "INCH" or "FEET"
+    val marblePieces: Int = 0,
+    val marbleTotalSqFt: Double = 0.0,
+    val marbleRatePerSqFt: Double = 0.0
 ) {
-    val totalPieces: Int get() = (fullBoxes * product.piecesPerBox) + loosePieces
+    val isMarble: Boolean get() = itemType == "MARBLE"
+    val totalPieces: Int
+        get() = if (isMarble) marblePieces.coerceAtLeast(fullBoxes) else (fullBoxes * product.piecesPerBox) + loosePieces
     val lineTotal: Double
         get() {
+            if (isMarble) {
+                return marbleTotalSqFt * marbleRatePerSqFt
+            }
             val boxTotal = fullBoxes * pricePerBox
             val pieceRate = if (product.piecesPerBox > 0) pricePerBox / product.piecesPerBox else 0.0
             val looseTotal = loosePieces * pieceRate
             return boxTotal + looseTotal
         }
+
+    fun toOrderItemEntity(orderId: Long = 0L): OrderItemEntity {
+        val qtyBoxes = if (isMarble) marblePieces.coerceAtLeast(1) else fullBoxes
+        val qtyLoose = if (isMarble) 0 else loosePieces
+        val effectiveRatePerBox = if (isMarble) {
+            if (qtyBoxes > 0) lineTotal / qtyBoxes else lineTotal
+        } else {
+            pricePerBox
+        }
+        return OrderItemEntity(
+            orderId = orderId,
+            productId = product.id,
+            tileCode = product.code,
+            tileName = product.name,
+            tileSize = product.size,
+            piecesPerBox = if (isMarble) 1 else product.piecesPerBox,
+            tilePhotoUri = product.photoUri,
+            fullBoxes = qtyBoxes,
+            loosePieces = qtyLoose,
+            pricePerBox = effectiveRatePerBox,
+            lineTotal = lineTotal,
+            itemType = itemType,
+            marbleLength = marbleLength,
+            marbleWidth = marbleWidth,
+            marbleUnit = marbleUnit,
+            marblePieces = marblePieces,
+            marbleTotalSqFt = marbleTotalSqFt,
+            marbleRatePerSqFt = marbleRatePerSqFt
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -144,13 +189,18 @@ fun SaleOrderScreen(
     var customerAddress by remember { mutableStateOf("") }
     var orderNotes by remember { mutableStateOf("") }
     var showPriceOnPdf by remember { mutableStateOf(true) }
+    var showSizeTotalOnPdf by remember { mutableStateOf(true) }
+    var showDeliveryStatusOnPdf by remember { mutableStateOf(true) }
     var discountStr by remember { mutableStateOf("") }
     var paidAmountStr by remember { mutableStateOf("") }
     var orderStatus by remember { mutableStateOf("PENDING") }
+    var isDeliveredImmediately by remember { mutableStateOf(true) }
     var isInitialized by remember { mutableStateOf(false) }
 
     val orderItems = remember { mutableStateListOf<DraftOrderItem>() }
     var showTilePickerModal by remember { mutableStateOf(false) }
+    var pendingTileForQtyPopup by remember { mutableStateOf<TileProduct?>(null) }
+    var showMarbleItemModal by remember { mutableStateOf(false) }
     var showManualItemModal by remember { mutableStateOf(false) }
 
     LaunchedEffect(existingOrderWithItems, products) {
@@ -163,6 +213,8 @@ fun SaleOrderScreen(
             customerAddress = order.customerAddress
             orderNotes = order.notes
             showPriceOnPdf = order.showPriceOnPdf
+            showSizeTotalOnPdf = order.showSizeTotalOnPdf
+            showDeliveryStatusOnPdf = order.showDeliveryStatusOnPdf
             discountStr = if (order.discount > 0) order.discount.toString() else "0"
             paidAmountStr = if (order.paidAmount > 0) String.format(Locale.US, "%.0f", order.paidAmount) else ""
             orderStatus = order.status
@@ -184,7 +236,14 @@ fun SaleOrderScreen(
                         product = matchedProduct,
                         fullBoxes = item.fullBoxes,
                         loosePieces = item.loosePieces,
-                        pricePerBox = item.pricePerBox
+                        pricePerBox = item.pricePerBox,
+                        itemType = item.itemType,
+                        marbleLength = item.marbleLength,
+                        marbleWidth = item.marbleWidth,
+                        marbleUnit = item.marbleUnit,
+                        marblePieces = item.marblePieces,
+                        marbleTotalSqFt = item.marbleTotalSqFt,
+                        marbleRatePerSqFt = item.marbleRatePerSqFt
                     )
                 )
             }
@@ -364,57 +423,80 @@ fun SaleOrderScreen(
                 }
             }
 
-            // 2. Per-Order PDF Price Visibility Switch
+            // 2. Per-Order PDF Customization Switches (Price, Size-wise Box Totals, Delivery Status)
             item {
-                PdfPriceVisibilitySwitchCard(
+                PdfDisplaySwitchesCard(
                     showPrice = showPriceOnPdf,
-                    onToggle = { showPriceOnPdf = it }
+                    onTogglePrice = { showPriceOnPdf = it },
+                    showSizeTotal = showSizeTotalOnPdf,
+                    onToggleSizeTotal = { showSizeTotalOnPdf = it },
+                    showDeliveryStatus = showDeliveryStatusOnPdf,
+                    onToggleDeliveryStatus = { showDeliveryStatusOnPdf = it }
                 )
             }
 
-            // 3. Tile Items Header & "Add Tile" button
+            // 3. Tile / Marble / Manual Items Header & Action Buttons
             item {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column {
-                        Text(
-                            text = "Tile Products in Order",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "${orderItems.size} tiles selected",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column {
+                            Text(
+                                text = "Order Items (टाइल / मार्बल / सामान)",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "${orderItems.size} items added",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { showManualItemModal = true },
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.testTag("button_add_manual_item")
-                        ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("मैन्युअल आइटम", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Button(
                             onClick = { showTilePickerModal = true },
                             colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary),
                             shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.testTag("button_add_tile_to_order")
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("button_add_tile_to_order")
                         ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Add Tile", fontSize = 12.sp)
+                            Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp), tint = PureWhite)
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text("टाइल जोड़ें", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                        }
+
+                        Button(
+                            onClick = { showMarbleItemModal = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB45309)),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("button_add_marble_item")
+                        ) {
+                            Text("🪨 मार्बल/पत्थर", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                        }
+
+                        OutlinedButton(
+                            onClick = { showManualItemModal = true },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .weight(0.95f)
+                                .testTag("button_add_manual_item")
+                        ) {
+                            Text("➕ अन्य", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -454,9 +536,11 @@ fun SaleOrderScreen(
                     }
                 }
             } else {
-                // Quick Size Pricing Bar (Customize rate in 1-click for 12x18 and other sizes)
+                // Quick Size Pricing Bar (Customize rate in 1-click for 12x18 and other sizes - Tiles only)
+                val tileOnlyItems = orderItems.filter { !it.isMarble }
+                if (tileOnlyItems.isNotEmpty()) {
                 item {
-                    val uniqueSizes = orderItems.map { it.product.size.trim() }.distinct().filter { it.isNotBlank() }
+                    val uniqueSizes = tileOnlyItems.map { it.product.size.trim() }.distinct().filter { it.isNotBlank() }
                     Card(
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F5F9)),
@@ -606,15 +690,34 @@ fun SaleOrderScreen(
                         }
                     }
                 }
+                }
 
                 itemsIndexed(orderItems) { index, draftItem ->
                     DraftOrderItemCard(
                         item = draftItem,
                         onQuantityChanged = { fullBoxes, loosePieces ->
-                            orderItems[index] = draftItem.copy(fullBoxes = fullBoxes, loosePieces = loosePieces)
+                            if (draftItem.isMarble) {
+                                val newPcs = fullBoxes.coerceAtLeast(1)
+                                val perSlabSqFt = if (draftItem.marbleUnit == "FEET") {
+                                    draftItem.marbleLength * draftItem.marbleWidth
+                                } else {
+                                    (draftItem.marbleLength * draftItem.marbleWidth) / 144.0
+                                }
+                                orderItems[index] = draftItem.copy(
+                                    fullBoxes = newPcs,
+                                    marblePieces = newPcs,
+                                    marbleTotalSqFt = perSlabSqFt * newPcs
+                                )
+                            } else {
+                                orderItems[index] = draftItem.copy(fullBoxes = fullBoxes, loosePieces = loosePieces)
+                            }
                         },
                         onPriceChanged = { price ->
-                            orderItems[index] = draftItem.copy(pricePerBox = price)
+                            if (draftItem.isMarble) {
+                                orderItems[index] = draftItem.copy(marbleRatePerSqFt = price)
+                            } else {
+                                orderItems[index] = draftItem.copy(pricePerBox = price)
+                            }
                         },
                         onHighlighterToggled = { isHl ->
                             orderItems[index] = draftItem.copy(isPremiumHighlighter = isHl)
@@ -841,21 +944,7 @@ fun SaleOrderScreen(
                                         viewModel.showMessage("Please add at least one tile to the order")
                                         return@Button
                                     }
-                                    val entityItems = orderItems.map { draft ->
-                                        OrderItemEntity(
-                                            orderId = editOrderId,
-                                            productId = draft.product.id,
-                                            tileCode = draft.product.code,
-                                            tileName = draft.product.name,
-                                            tileSize = draft.product.size,
-                                            piecesPerBox = draft.product.piecesPerBox,
-                                            tilePhotoUri = draft.product.photoUri,
-                                            fullBoxes = draft.fullBoxes,
-                                            loosePieces = draft.loosePieces,
-                                            pricePerBox = draft.pricePerBox,
-                                            lineTotal = draft.lineTotal
-                                        )
-                                    }
+                                    val entityItems = orderItems.map { draft -> draft.toOrderItemEntity(editOrderId) }
                                     val existingOrder = existingOrderWithItems?.order
                                     val currentPaid = if (paidAmountStr.isNotBlank()) paidAmount else (existingOrder?.paidAmount ?: 0.0)
                                     val currentBal = (grandTotal - currentPaid).coerceAtLeast(0.0)
@@ -865,6 +954,8 @@ fun SaleOrderScreen(
                                         customerAddress = customerAddress.trim(),
                                         status = orderStatus,
                                         showPriceOnPdf = showPriceOnPdf,
+                                        showSizeTotalOnPdf = showSizeTotalOnPdf,
+                                        showDeliveryStatusOnPdf = showDeliveryStatusOnPdf,
                                         subtotal = subtotal,
                                         discount = discount,
                                         grandTotal = grandTotal,
@@ -879,6 +970,8 @@ fun SaleOrderScreen(
                                         customerAddress = customerAddress.trim(),
                                         status = orderStatus,
                                         showPriceOnPdf = showPriceOnPdf,
+                                        showSizeTotalOnPdf = showSizeTotalOnPdf,
+                                        showDeliveryStatusOnPdf = showDeliveryStatusOnPdf,
                                         subtotal = subtotal,
                                         discount = discount,
                                         grandTotal = grandTotal,
@@ -909,6 +1002,100 @@ fun SaleOrderScreen(
                                 Text("Update & Save Order (ऑर्डर सेव करें)", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = PureWhite)
                             }
                         } else {
+                            // Delivery Mode Selector (Full Delivery Now vs Hold / Partial Delivery)
+                            Card(
+                                shape = RoundedCornerShape(12.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (isDeliveredImmediately) Color(0xFFF0FDF4) else Color(0xFFFFF7ED)
+                                ),
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    if (isDeliveredImmediately) Color(0xFFBBF7D0) else Color(0xFFFED7AA)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        text = "🚚 टाइल डिलीवरी स्थिति (Tile Pickup Mode)",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = if (isDeliveredImmediately) Color(0xFF166534) else Color(0xFFC2410C)
+                                    )
+                                    Text(
+                                        text = "क्या ग्राहक अभी पूरी टाइल ले जा रहे हैं या पर्ची बनवाकर बाद में थोड़ी-थोड़ी ले जाएंगे?",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF475569)
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = if (isDeliveredImmediately) Color(0xFF16A34A) else Color.White,
+                                            border = androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                if (isDeliveredImmediately) Color(0xFF16A34A) else Color(0xFFCBD5E1)
+                                            ),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clickable { isDeliveredImmediately = true }
+                                                .testTag("delivery_mode_full_now")
+                                        ) {
+                                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                                                Text(
+                                                    text = "✅ अभी पूरी ले जा रहे",
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 12.sp,
+                                                    color = if (isDeliveredImmediately) PureWhite else Navy900
+                                                )
+                                                Text(
+                                                    text = "Full Delivery Now",
+                                                    fontSize = 10.sp,
+                                                    color = if (isDeliveredImmediately) Color(0xFFDCFCE7) else Color(0xFF64748B)
+                                                )
+                                            }
+                                        }
+
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = if (!isDeliveredImmediately) Color(0xFFEA580C) else Color.White,
+                                            border = androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                if (!isDeliveredImmediately) Color(0xFFEA580C) else Color(0xFFCBD5E1)
+                                            ),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clickable { isDeliveredImmediately = false }
+                                                .testTag("delivery_mode_hold_partial")
+                                        ) {
+                                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                                                Text(
+                                                    text = "📦 बाद में थोड़ी-थोड़ी",
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 12.sp,
+                                                    color = if (!isDeliveredImmediately) PureWhite else Navy900
+                                                )
+                                                Text(
+                                                    text = "Hold / Partial Pickup",
+                                                    fontSize = 10.sp,
+                                                    color = if (!isDeliveredImmediately) Color(0xFFFFEDD5) else Color(0xFF64748B)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if (!isDeliveredImmediately) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Text(
+                                            text = "ℹ️ पर्ची व भुगतान अभी सेव होगा; ग्राहक जिस तारीख को जितनी टाइल ले जाएंगे, आप ऑर्डर खोलकर 'डिलीवरी दर्ज करें' में लिख सकेंगे।",
+                                            fontSize = 10.5.sp,
+                                            color = Color(0xFF9A3412)
+                                        )
+                                    }
+                                }
+                            }
+
                             // Confirm & Deduct Stock immediately
                             Button(
                                 onClick = {
@@ -916,20 +1103,7 @@ fun SaleOrderScreen(
                                         viewModel.showMessage("Please enter customer name")
                                         return@Button
                                     }
-                                    val entityItems = orderItems.map { draft ->
-                                        OrderItemEntity(
-                                            productId = draft.product.id,
-                                            tileCode = draft.product.code,
-                                            tileName = draft.product.name,
-                                            tileSize = draft.product.size,
-                                            piecesPerBox = draft.product.piecesPerBox,
-                                            tilePhotoUri = draft.product.photoUri,
-                                            fullBoxes = draft.fullBoxes,
-                                            loosePieces = draft.loosePieces,
-                                            pricePerBox = draft.pricePerBox,
-                                            lineTotal = draft.lineTotal
-                                        )
-                                    }
+                                    val entityItems = orderItems.map { draft -> draft.toOrderItemEntity() }
                                     viewModel.createSaleOrder(
                                         invoiceNumber = invoiceNumber,
                                         customerId = selectedCustomer?.id,
@@ -938,12 +1112,15 @@ fun SaleOrderScreen(
                                         customerAddress = customerAddress,
                                         status = "CONFIRMED",
                                         showPriceOnPdf = showPriceOnPdf,
+                                        showSizeTotalOnPdf = showSizeTotalOnPdf,
+                                        showDeliveryStatusOnPdf = showDeliveryStatusOnPdf,
                                         subtotal = subtotal,
                                         discount = discount,
                                         grandTotal = grandTotal,
                                         paidAmount = paidAmount,
                                         notes = orderNotes,
                                         items = entityItems,
+                                        isDeliveredImmediately = isDeliveredImmediately,
                                         onSuccess = { orderId ->
                                             viewModel.navigateTo(Screen.OrderDetail(orderId))
                                         },
@@ -961,7 +1138,12 @@ fun SaleOrderScreen(
                             ) {
                                 Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = PureWhite)
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Confirm Sale & Deduct Stock", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = PureWhite)
+                                Text(
+                                    text = if (isDeliveredImmediately) "Confirm Sale & Deduct Stock" else "Confirm Booking (Hold / Partial Delivery)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = PureWhite
+                                )
                             }
 
                             // Save as Pending (Estimate) without stock deduction
@@ -971,20 +1153,7 @@ fun SaleOrderScreen(
                                         viewModel.showMessage("Please enter customer name")
                                         return@OutlinedButton
                                     }
-                                    val entityItems = orderItems.map { draft ->
-                                        OrderItemEntity(
-                                            productId = draft.product.id,
-                                            tileCode = draft.product.code,
-                                            tileName = draft.product.name,
-                                            tileSize = draft.product.size,
-                                            piecesPerBox = draft.product.piecesPerBox,
-                                            tilePhotoUri = draft.product.photoUri,
-                                            fullBoxes = draft.fullBoxes,
-                                            loosePieces = draft.loosePieces,
-                                            pricePerBox = draft.pricePerBox,
-                                            lineTotal = draft.lineTotal
-                                        )
-                                    }
+                                    val entityItems = orderItems.map { draft -> draft.toOrderItemEntity() }
                                     viewModel.createSaleOrder(
                                         invoiceNumber = invoiceNumber,
                                         customerId = selectedCustomer?.id,
@@ -993,12 +1162,15 @@ fun SaleOrderScreen(
                                         customerAddress = customerAddress,
                                         status = "PENDING",
                                         showPriceOnPdf = showPriceOnPdf,
+                                        showSizeTotalOnPdf = showSizeTotalOnPdf,
+                                        showDeliveryStatusOnPdf = showDeliveryStatusOnPdf,
                                         subtotal = subtotal,
                                         discount = discount,
                                         grandTotal = grandTotal,
                                         paidAmount = paidAmount,
                                         notes = orderNotes,
                                         items = entityItems,
+                                        isDeliveredImmediately = isDeliveredImmediately,
                                         onSuccess = { orderId ->
                                             viewModel.navigateTo(Screen.OrderDetail(orderId))
                                         },
@@ -1028,40 +1200,102 @@ fun SaleOrderScreen(
         }
     }
 
-    // Modal: Select Tile from Inventory
+    // Modal: Select Tile from Inventory -> Opens Quick Quantity Pop-up!
     if (showTilePickerModal) {
         TileProductPickerModal(
             products = products,
             onDismiss = { showTilePickerModal = false },
             onTileSelected = { product ->
-                // Check if already in order
-                val existing = orderItems.find { it.product.id == product.id }
-                if (existing != null) {
-                    viewModel.showMessage("${product.name} is already in the order.")
+                showTilePickerModal = false
+                pendingTileForQtyPopup = product
+            }
+        )
+    }
+
+    // Modal: Quick Quantity Pop-up when tapping any tile
+    pendingTileForQtyPopup?.let { selectedProd ->
+        val existingIdx = orderItems.indexOfFirst { !it.isMarble && it.product.id == selectedProd.id }
+        val sizeDefault = sizePricings.find { it.sizeName.equals(selectedProd.size, ignoreCase = true) }?.defaultPricePerBox
+        val suggestedPrice = when {
+            existingIdx >= 0 -> orderItems[existingIdx].pricePerBox
+            selectedProd.defaultSellingPrice > 0 -> selectedProd.defaultSellingPrice
+            sizeDefault != null && sizeDefault > 0 -> sizeDefault
+            else -> 350.0
+        }
+        QuickAddTileQtyDialog(
+            product = selectedProd,
+            initialBoxes = if (existingIdx >= 0) orderItems[existingIdx].fullBoxes else 1,
+            initialLoose = if (existingIdx >= 0) orderItems[existingIdx].loosePieces else 0,
+            initialRate = suggestedPrice,
+            isUpdatingExisting = existingIdx >= 0,
+            onDismiss = { pendingTileForQtyPopup = null },
+            onConfirm = { boxes, loose, rate ->
+                val isHighlighterInitial = selectedProd.name.contains("highlighter", ignoreCase = true) ||
+                        selectedProd.name.contains("hl", ignoreCase = true) ||
+                        selectedProd.name.contains("decor", ignoreCase = true) ||
+                        selectedProd.name.contains("dark", ignoreCase = true) ||
+                        selectedProd.name.contains("premium", ignoreCase = true)
+                if (existingIdx >= 0) {
+                    orderItems[existingIdx] = orderItems[existingIdx].copy(
+                        fullBoxes = boxes,
+                        loosePieces = loose,
+                        pricePerBox = rate
+                    )
+                    viewModel.showMessage("${selectedProd.name} की मात्रा अपडेट हो गई!")
                 } else {
-                    // Smart size pricing suggestion
-                    val sizeDefault = sizePricings.find { it.sizeName.equals(product.size, ignoreCase = true) }?.defaultPricePerBox
-                    val initialPrice = when {
-                        product.defaultSellingPrice > 0 -> product.defaultSellingPrice
-                        sizeDefault != null && sizeDefault > 0 -> sizeDefault
-                        else -> 350.0
-                    }
-                    val isHighlighterInitial = product.name.contains("highlighter", ignoreCase = true) ||
-                            product.name.contains("hl", ignoreCase = true) ||
-                            product.name.contains("decor", ignoreCase = true) ||
-                            product.name.contains("dark", ignoreCase = true) ||
-                            product.name.contains("premium", ignoreCase = true)
                     orderItems.add(
                         DraftOrderItem(
-                            product = product,
-                            fullBoxes = 1,
-                            loosePieces = 0,
-                            pricePerBox = initialPrice,
-                            isPremiumHighlighter = isHighlighterInitial
+                            product = selectedProd,
+                            fullBoxes = boxes,
+                            loosePieces = loose,
+                            pricePerBox = rate,
+                            isPremiumHighlighter = isHighlighterInitial,
+                            itemType = "TILE"
                         )
                     )
+                    viewModel.showMessage("${selectedProd.name} ($boxes बॉक्स) बिल में जुड़ा!")
                 }
-                showTilePickerModal = false
+                pendingTileForQtyPopup = null
+            }
+        )
+    }
+
+    // Modal: Add Marble / Stone (मार्बल / पत्थर — लंबाई × चौड़ाई → Sq.Ft व ₹/Sq.Ft कैलकुलेटर)
+    if (showMarbleItemModal) {
+        MarbleItemDialog(
+            onDismiss = { showMarbleItemModal = false },
+            onMarbleAdded = { name, unit, length, width, pieces, totalSqFt, ratePerSqFt ->
+                val virtualId = -System.currentTimeMillis()
+                val fmtL = if (length % 1.0 == 0.0) length.toInt().toString() else String.format(Locale.US, "%.1f", length)
+                val fmtW = if (width % 1.0 == 0.0) width.toInt().toString() else String.format(Locale.US, "%.1f", width)
+                val unitShort = if (unit == "FEET") "ft" else "in"
+                val lineTot = totalSqFt * ratePerSqFt
+                val virtualProduct = TileProduct(
+                    id = virtualId,
+                    name = name,
+                    code = "MARBLE",
+                    size = "${fmtL}x${fmtW} $unitShort",
+                    piecesPerBox = 1,
+                    defaultSellingPrice = if (pieces > 0) lineTot / pieces else lineTot,
+                    stockPieces = 99999
+                )
+                orderItems.add(
+                    DraftOrderItem(
+                        product = virtualProduct,
+                        fullBoxes = pieces.coerceAtLeast(1),
+                        loosePieces = 0,
+                        pricePerBox = if (pieces > 0) lineTot / pieces else lineTot,
+                        itemType = "MARBLE",
+                        marbleLength = length,
+                        marbleWidth = width,
+                        marbleUnit = unit,
+                        marblePieces = pieces.coerceAtLeast(1),
+                        marbleTotalSqFt = totalSqFt,
+                        marbleRatePerSqFt = ratePerSqFt
+                    )
+                )
+                showMarbleItemModal = false
+                viewModel.showMessage("🪨 $name (${String.format(Locale.US, "%.2f", totalSqFt)} Sq.Ft) बिल में जुड़ा!")
             }
         )
     }
@@ -1086,7 +1320,8 @@ fun SaleOrderScreen(
                         product = virtualProduct,
                         fullBoxes = boxes,
                         loosePieces = 0,
-                        pricePerBox = rate
+                        pricePerBox = rate,
+                        itemType = "MANUAL"
                     )
                 )
                 showManualItemModal = false
@@ -1105,9 +1340,15 @@ private fun DraftOrderItemCard(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var boxesStr by remember(item.fullBoxes) { mutableStateOf(if (item.fullBoxes > 0) item.fullBoxes.toString() else "") }
+    var boxesStr by remember(item.fullBoxes, item.marblePieces) {
+        val v = if (item.isMarble) item.marblePieces else item.fullBoxes
+        mutableStateOf(if (v > 0) v.toString() else "")
+    }
     var looseStr by remember(item.loosePieces) { mutableStateOf(if (item.loosePieces > 0) item.loosePieces.toString() else "") }
-    var priceStr by remember(item.pricePerBox) { mutableStateOf(if (item.pricePerBox > 0) item.pricePerBox.toString() else "") }
+    var priceStr by remember(item.pricePerBox, item.marbleRatePerSqFt) {
+        val p = if (item.isMarble) item.marbleRatePerSqFt else item.pricePerBox
+        mutableStateOf(if (p > 0) p.toString() else "")
+    }
 
     fun sanitizeQuantity(previous: String, incoming: String): String {
         val digits = incoming.filter { it.isDigit() }
@@ -1122,7 +1363,10 @@ private fun DraftOrderItemCard(
 
     Card(
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(
+            containerColor = if (item.isMarble) Color(0xFFFFFBEB) else MaterialTheme.colorScheme.surface
+        ),
+        border = if (item.isMarble) BorderStroke(1.dp, Color(0xFFFCD34D)) else null,
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         modifier = modifier.fillMaxWidth()
     ) {
@@ -1137,8 +1381,8 @@ private fun DraftOrderItemCard(
                     modifier = Modifier
                         .size(52.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFFF1F5F9))
-                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
+                        .background(if (item.isMarble) Color(0xFFFEF3C7) else Color(0xFFF1F5F9))
+                        .border(1.dp, if (item.isMarble) Color(0xFFF59E0B) else Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
                 ) {
                     if (!item.product.photoUri.isNullOrBlank()) {
                         Image(
@@ -1147,6 +1391,8 @@ private fun DraftOrderItemCard(
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
+                    } else if (item.isMarble) {
+                        Text("🪨", fontSize = 22.sp)
                     } else {
                         Text(
                             text = item.product.size,
@@ -1160,22 +1406,54 @@ private fun DraftOrderItemCard(
                 Spacer(modifier = Modifier.width(10.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = item.product.name,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = "Code: ${item.product.code} | Size: ${item.product.size} (${item.product.piecesPerBox} Pcs/Bx)",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "Available Warehouse Stock: ${item.product.stockDisplay}",
-                        fontSize = 11.sp,
-                        color = if (item.product.isLowStock) StatusError else Color(0xFF16A34A)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = item.product.name,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (item.isMarble) {
+                            Surface(color = Color(0xFFD97706), shape = RoundedCornerShape(4.dp)) {
+                                Text(
+                                    text = "MARBLE",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = PureWhite,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+                    if (item.isMarble) {
+                        val unitLbl = if (item.marbleUnit == "FEET") "ft" else "in"
+                        Text(
+                            text = "माप: ${item.marbleLength} × ${item.marbleWidth} $unitLbl • ${item.marblePieces} नग",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF92400E)
+                        )
+                        Text(
+                            text = "कुल क्षेत्रफल: ${String.format(Locale.US, "%.2f", item.marbleTotalSqFt)} Sq.Ft  •  ₹${String.format(Locale.US, "%.2f", item.marbleRatePerSqFt)}/Sq.Ft",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF15803D)
+                        )
+                    } else {
+                        Text(
+                            text = "Code: ${item.product.code} | Size: ${item.product.size} (${item.product.piecesPerBox} Pcs/Bx)",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (item.product.id > 0L) {
+                            Text(
+                                text = "Available Warehouse Stock: ${item.product.stockDisplay}",
+                                fontSize = 11.sp,
+                                color = if (item.product.isLowStock) StatusError else Color(0xFF16A34A)
+                            )
+                        }
+                    }
                 }
 
                 IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
@@ -1183,110 +1461,154 @@ private fun DraftOrderItemCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            if (!item.isMarble) {
+                Spacer(modifier = Modifier.height(6.dp))
 
-            // Type selector: Standard vs Premium / Highlighter
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = if (!item.isPremiumHighlighter) Color(0xFFE2E8F0) else Color.Transparent,
-                    border = BorderStroke(1.dp, if (!item.isPremiumHighlighter) Color(0xFF94A3B8) else Color(0xFFCBD5E1)),
-                    modifier = Modifier.clickable { onHighlighterToggled(false) }
+                // Type selector: Standard vs Premium / Highlighter
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = "सामान्य (Standard)",
-                        fontSize = 11.sp,
-                        fontWeight = if (!item.isPremiumHighlighter) FontWeight.Bold else FontWeight.Normal,
-                        color = if (!item.isPremiumHighlighter) Color(0xFF1E293B) else Color(0xFF64748B),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
-                }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (!item.isPremiumHighlighter) Color(0xFFE2E8F0) else Color.Transparent,
+                        border = BorderStroke(1.dp, if (!item.isPremiumHighlighter) Color(0xFF94A3B8) else Color(0xFFCBD5E1)),
+                        modifier = Modifier.clickable { onHighlighterToggled(false) }
+                    ) {
+                        Text(
+                            text = "सामान्य (Standard)",
+                            fontSize = 11.sp,
+                            fontWeight = if (!item.isPremiumHighlighter) FontWeight.Bold else FontWeight.Normal,
+                            color = if (!item.isPremiumHighlighter) Color(0xFF1E293B) else Color(0xFF64748B),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
 
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = if (item.isPremiumHighlighter) Color(0xFFFEF3C7) else Color.Transparent,
-                    border = BorderStroke(1.dp, if (item.isPremiumHighlighter) Color(0xFFD97706) else Color(0xFFCBD5E1)),
-                    modifier = Modifier.clickable { onHighlighterToggled(true) }
-                ) {
-                    Text(
-                        text = "✨ प्रीमियम / हाईलाइटर",
-                        fontSize = 11.sp,
-                        fontWeight = if (item.isPremiumHighlighter) FontWeight.Bold else FontWeight.Normal,
-                        color = if (item.isPremiumHighlighter) Color(0xFFB45309) else Color(0xFF64748B),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (item.isPremiumHighlighter) Color(0xFFFEF3C7) else Color.Transparent,
+                        border = BorderStroke(1.dp, if (item.isPremiumHighlighter) Color(0xFFD97706) else Color(0xFFCBD5E1)),
+                        modifier = Modifier.clickable { onHighlighterToggled(true) }
+                    ) {
+                        Text(
+                            text = "✨ प्रीमियम / हाईलाइटर",
+                            fontSize = 11.sp,
+                            fontWeight = if (item.isPremiumHighlighter) FontWeight.Bold else FontWeight.Normal,
+                            color = if (item.isPremiumHighlighter) Color(0xFFB45309) else Color(0xFF64748B),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Quantity inputs: Full Boxes & Loose Pieces
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                OutlinedTextField(
-                    value = boxesStr,
-                    onValueChange = {
-                        val cleaned = sanitizeQuantity(boxesStr, it)
-                        boxesStr = cleaned
-                        val b = cleaned.toIntOrNull() ?: 0
-                        onQuantityChanged(b, item.loosePieces)
-                    },
-                    label = { Text("Full Boxes *") },
-                    placeholder = { Text("1") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.weight(1f)
-                )
+            // Quantity & Rate inputs
+            if (item.isMarble) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = boxesStr,
+                        onValueChange = {
+                            val cleaned = sanitizeQuantity(boxesStr, it)
+                            boxesStr = cleaned
+                            val p = cleaned.toIntOrNull() ?: 1
+                            onQuantityChanged(p.coerceAtLeast(1), 0)
+                        },
+                        label = { Text("नग / पीस (Slabs)") },
+                        placeholder = { Text("1") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    )
 
-                OutlinedTextField(
-                    value = looseStr,
-                    onValueChange = {
-                        val cleaned = sanitizeQuantity(looseStr, it)
-                        looseStr = cleaned
-                        val l = cleaned.toIntOrNull() ?: 0
-                        onQuantityChanged(item.fullBoxes, l)
-                    },
-                    label = { Text("Loose Pcs") },
-                    placeholder = { Text("0") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.weight(1f)
-                )
+                    OutlinedTextField(
+                        value = priceStr,
+                        onValueChange = {
+                            priceStr = it
+                            val r = it.toDoubleOrNull() ?: 0.0
+                            onPriceChanged(r)
+                        },
+                        label = { Text("रेट ₹ / Sq.Ft *") },
+                        placeholder = { Text("0.0") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1.3f)
+                    )
+                }
+            } else {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = boxesStr,
+                        onValueChange = {
+                            val cleaned = sanitizeQuantity(boxesStr, it)
+                            boxesStr = cleaned
+                            val b = cleaned.toIntOrNull() ?: 0
+                            onQuantityChanged(b, item.loosePieces)
+                        },
+                        label = { Text("Full Boxes *") },
+                        placeholder = { Text("1") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    )
 
-                OutlinedTextField(
-                    value = priceStr,
-                    onValueChange = {
-                        priceStr = it
-                        val p = it.toDoubleOrNull() ?: 0.0
-                        onPriceChanged(p)
-                    },
-                    label = { Text("Rate/Box (₹) *") },
-                    placeholder = { Text("0.0") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.weight(1.2f)
-                )
+                    OutlinedTextField(
+                        value = looseStr,
+                        onValueChange = {
+                            val cleaned = sanitizeQuantity(looseStr, it)
+                            looseStr = cleaned
+                            val l = cleaned.toIntOrNull() ?: 0
+                            onQuantityChanged(item.fullBoxes, l)
+                        },
+                        label = { Text("Loose Pcs") },
+                        placeholder = { Text("0") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    OutlinedTextField(
+                        value = priceStr,
+                        onValueChange = {
+                            priceStr = it
+                            val p = it.toDoubleOrNull() ?: 0.0
+                            onPriceChanged(p)
+                        },
+                        label = { Text("Rate/Box (₹) *") },
+                        placeholder = { Text("0.0") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1.2f)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Internal calculation footer
+            // Footer
             Row(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "Internal: ${item.totalPieces} total pieces to adjust",
+                    text = if (item.isMarble) {
+                        "कुल: ${String.format(Locale.US, "%.2f", item.marbleTotalSqFt)} Sq.Ft × ₹${String.format(Locale.US, "%.2f", item.marbleRatePerSqFt)}"
+                    } else {
+                        "Internal: ${item.totalPieces} total pieces to adjust"
+                    },
                     fontSize = 11.sp,
                     color = Color(0xFF64748B)
                 )
@@ -1556,6 +1878,355 @@ private fun ManualItemDialog(
                 colors = ButtonDefaults.buttonColors(containerColor = Navy900)
             ) {
                 Text("बिल में जोड़ें (Add to Bill)", color = PureWhite, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("रद्द करें")
+            }
+        }
+    )
+}
+
+@Composable
+private fun QuickAddTileQtyDialog(
+    product: TileProduct,
+    initialBoxes: Int,
+    initialLoose: Int,
+    initialRate: Double,
+    isUpdatingExisting: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (boxes: Int, loose: Int, rate: Double) -> Unit
+) {
+    var boxesStr by remember { mutableStateOf(if (initialBoxes > 0) initialBoxes.toString() else "1") }
+    var looseStr by remember { mutableStateOf(if (initialLoose > 0) initialLoose.toString() else "0") }
+    var rateStr by remember { mutableStateOf(if (initialRate > 0) String.format(Locale.US, "%.0f", initialRate) else "") }
+
+    val boxes = boxesStr.toIntOrNull() ?: 0
+    val loose = looseStr.toIntOrNull() ?: 0
+    val rate = rateStr.toDoubleOrNull() ?: 0.0
+    val pieceRate = if (product.piecesPerBox > 0) rate / product.piecesPerBox else 0.0
+    val totalPieces = (boxes * product.piecesPerBox) + loose
+    val lineTotal = (boxes * rate) + (loose * pieceRate)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFF1F5F9))
+                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
+                ) {
+                    if (!product.photoUri.isNullOrBlank()) {
+                        Image(
+                            painter = rememberAsyncImagePainter(product.photoUri),
+                            contentDescription = product.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Text(product.size, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Navy900)
+                    }
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(product.name, fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1)
+                    Text(
+                        text = "${product.size} • Code: ${product.code} • ${product.piecesPerBox} Pcs/Bx",
+                        fontSize = 11.sp,
+                        color = Color(0xFF64748B)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (product.isLowStock) Color(0xFFFEF2F2) else Color(0xFFECFDF5),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "📦 उपलब्ध स्टॉक: ${product.stockDisplay}" + if (product.location.isNotBlank()) "  •  📍 ${product.location}" else "",
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (product.isLowStock) Color(0xFFDC2626) else Color(0xFF065F46),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+
+                // Quick Box Shortcut Chips
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    listOf(1, 2, 5, 10, 15, 20, 25).forEach { q ->
+                        FilterChip(
+                            selected = boxes == q,
+                            onClick = { boxesStr = q.toString() },
+                            label = { Text("$q Bx", fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = boxesStr,
+                        onValueChange = { boxesStr = it.filter { c -> c.isDigit() } },
+                        label = { Text("पेटी / बॉक्स *") },
+                        placeholder = { Text("1") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).testTag("quick_qty_boxes_input")
+                    )
+
+                    OutlinedTextField(
+                        value = looseStr,
+                        onValueChange = { looseStr = it.filter { c -> c.isDigit() } },
+                        label = { Text("खुले पीस (Pcs)") },
+                        placeholder = { Text("0") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).testTag("quick_qty_loose_input")
+                    )
+                }
+
+                OutlinedTextField(
+                    value = rateStr,
+                    onValueChange = { rateStr = it.filter { c -> c.isDigit() || c == '.' } },
+                    label = { Text("रेट प्रति पेटी (₹ / Box) *") },
+                    placeholder = { Text("350") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFFF1F5F9),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text("कुल: $totalPieces पीस", fontSize = 11.5.sp, color = Color(0xFF475569))
+                        Text(
+                            text = "कुल राशि: ₹${String.format(Locale.US, "%.2f", lineTotal)}",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = Navy900
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (totalPieces <= 0) return@Button
+                    onConfirm(boxes, loose, rate)
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = StatusSuccess),
+                modifier = Modifier.testTag("quick_qty_ok_button")
+            ) {
+                Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp), tint = PureWhite)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(if (isUpdatingExisting) "OK / अपडेट करें" else "OK / जोड़ें", color = PureWhite, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("रद्द करें")
+            }
+        }
+    )
+}
+
+@Composable
+private fun MarbleItemDialog(
+    onDismiss: () -> Unit,
+    onMarbleAdded: (
+        name: String,
+        unit: String,
+        length: Double,
+        width: Double,
+        pieces: Int,
+        totalSqFt: Double,
+        ratePerSqFt: Double
+    ) -> Unit
+) {
+    var marbleName by remember { mutableStateOf("") }
+    var selectedUnit by remember { mutableStateOf("INCH") } // "INCH" or "FEET"
+    var lengthStr by remember { mutableStateOf("") }
+    var widthStr by remember { mutableStateOf("") }
+    var piecesStr by remember { mutableStateOf("1") }
+    var ratePerSqFtStr by remember { mutableStateOf("") }
+
+    val presets = listOf("Makrana White", "Black Granite", "Italian Marble", "Kota Stone", "Quartz", "Green Marble")
+
+    val lengthVal = lengthStr.toDoubleOrNull() ?: 0.0
+    val widthVal = widthStr.toDoubleOrNull() ?: 0.0
+    val piecesVal = (piecesStr.toIntOrNull() ?: 1).coerceAtLeast(1)
+    val rateVal = ratePerSqFtStr.toDoubleOrNull() ?: 0.0
+
+    val sqFtPerSlab = if (lengthVal > 0 && widthVal > 0) {
+        if (selectedUnit == "FEET") lengthVal * widthVal else (lengthVal * widthVal) / 144.0
+    } else 0.0
+    val totalSqFt = sqFtPerSlab * piecesVal
+    val grandAmount = totalSqFt * rateVal
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("🪨 मार्बल / पत्थर जोड़ें (Sq.Ft Calculator)", fontWeight = FontWeight.Bold, fontSize = 15.5.sp, color = Color(0xFF92400E))
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text("जल्दी चुनें (Quick Presets):", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF64748B))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    presets.forEach { preset ->
+                        FilterChip(
+                            selected = marbleName.equals(preset, ignoreCase = true),
+                            onClick = { marbleName = preset },
+                            label = { Text(preset, fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = marbleName,
+                    onValueChange = { marbleName = it },
+                    label = { Text("मार्बल / पत्थर का नाम *") },
+                    placeholder = { Text("उदा. Black Granite / Makrana White") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("marble_name_input")
+                )
+
+                Text("माप की इकाई (Unit):", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF475569))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    FilterChip(
+                        selected = selectedUnit == "INCH",
+                        onClick = { selectedUnit = "INCH" },
+                        label = { Text("📏 इंच (Inches) ÷ 144", fontSize = 11.5.sp) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = selectedUnit == "FEET",
+                        onClick = { selectedUnit = "FEET" },
+                        label = { Text("📐 फीट (Feet)", fontSize = 11.5.sp) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                val unitLbl = if (selectedUnit == "FEET") "फीट" else "इंच"
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = lengthStr,
+                        onValueChange = { lengthStr = it.filter { c -> c.isDigit() || c == '.' } },
+                        label = { Text("लंबाई ($unitLbl) *") },
+                        placeholder = { Text(if (selectedUnit == "FEET") "8" else "96") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).testTag("marble_length_input")
+                    )
+
+                    OutlinedTextField(
+                        value = widthStr,
+                        onValueChange = { widthStr = it.filter { c -> c.isDigit() || c == '.' } },
+                        label = { Text("चौड़ाई ($unitLbl) *") },
+                        placeholder = { Text(if (selectedUnit == "FEET") "3" else "36") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).testTag("marble_width_input")
+                    )
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = piecesStr,
+                        onValueChange = { piecesStr = it.filter { c -> c.isDigit() } },
+                        label = { Text("नग / पीस (Slabs)") },
+                        placeholder = { Text("1") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(0.9f).testTag("marble_pieces_input")
+                    )
+
+                    OutlinedTextField(
+                        value = ratePerSqFtStr,
+                        onValueChange = { ratePerSqFtStr = it.filter { c -> c.isDigit() || c == '.' } },
+                        label = { Text("रेट ₹ / Sq.Ft *") },
+                        placeholder = { Text("120") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1.3f).testTag("marble_rate_input")
+                    )
+                }
+
+                // Live Sq.Ft & Amount Calculation Box
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFFFFBEB),
+                    border = BorderStroke(1.dp, Color(0xFFF59E0B)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("प्रति नग क्षेत्रफल:", fontSize = 11.sp, color = Color(0xFF78350F))
+                            Text("${String.format(Locale.US, "%.2f", sqFtPerSlab)} Sq.Ft", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFF92400E))
+                        }
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("कुल क्षेत्रफल ($piecesVal नग):", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF78350F))
+                            Text("${String.format(Locale.US, "%.2f", totalSqFt)} Sq.Ft", fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFF15803D))
+                        }
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("कुल राशि (Total Amount):", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Navy900)
+                            Text("₹${String.format(Locale.US, "%.2f", grandAmount)}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFFB45309))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (marbleName.isBlank() || lengthVal <= 0.0 || widthVal <= 0.0) return@Button
+                    onMarbleAdded(
+                        marbleName.trim(),
+                        selectedUnit,
+                        lengthVal,
+                        widthVal,
+                        piecesVal,
+                        totalSqFt,
+                        rateVal
+                    )
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB45309)),
+                modifier = Modifier.testTag("marble_confirm_add_button")
+            ) {
+                Text("बिल में जोड़ें (Add Marble)", color = PureWhite, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {

@@ -1,7 +1,12 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -98,6 +103,9 @@ fun StaffScreen(
     val settings by viewModel.shopSettings.collectAsStateWithLifecycle()
     val activeTheme = getAppThemeOption(settings.appTheme)
     val adminConfig by viewModel.adminGlobalConfig.collectAsStateWithLifecycle()
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
     val allowSalaryAdvance = adminConfig?.allowSalaryAdvance != false
 
     var showAddStaffDialog by remember { mutableStateOf(false) }
@@ -274,7 +282,7 @@ fun StaffScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
-                            // Auto-Attendance Switch & Control
+                            // Auto-Attendance Switch & Background Schedule Control (Works Open or Closed!)
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
                                 color = if (settings.autoAttendanceEnabled) Color(0xFFEFF6FF) else Color(0xFFF8FAFC),
@@ -286,49 +294,90 @@ fun StaffScreen(
                                     .fillMaxWidth()
                                     .padding(bottom = 10.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(
-                                            text = "⚡ ऑटो-हाजिरी (Auto-Present):",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 12.sp,
-                                            color = if (settings.autoAttendanceEnabled) activeTheme.primary else Color(0xFF64748B)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = if (settings.autoAttendanceEnabled) Color(0xFFDCFCE7) else Color(0xFFF1F5F9),
-                                            modifier = Modifier.clickable {
-                                                val updated = settings.copy(autoAttendanceEnabled = !settings.autoAttendanceEnabled)
-                                                viewModel.saveShopSettings(updated)
-                                                if (updated.autoAttendanceEnabled) {
-                                                    viewModel.runAutoAttendanceToday()
-                                                }
-                                            }
-                                        ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
                                             Text(
-                                                text = if (settings.autoAttendanceEnabled) "चालू (ON) ✔" else "बंद (OFF)",
-                                                fontSize = 11.sp,
+                                                text = "⚡ ऑटो-हाजिरी (Auto-Present):",
                                                 fontWeight = FontWeight.Bold,
-                                                color = if (settings.autoAttendanceEnabled) Color(0xFF16A34A) else Color(0xFF64748B),
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                fontSize = 12.sp,
+                                                color = if (settings.autoAttendanceEnabled) activeTheme.primary else Color(0xFF64748B)
                                             )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = if (settings.autoAttendanceEnabled) Color(0xFFDCFCE7) else Color(0xFFF1F5F9),
+                                                modifier = Modifier
+                                                    .clickable {
+                                                        val updated = settings.copy(autoAttendanceEnabled = !settings.autoAttendanceEnabled)
+                                                        if (updated.autoAttendanceEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                                            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                                        }
+                                                        viewModel.saveShopSettings(updated)
+                                                        if (updated.autoAttendanceEnabled) {
+                                                            viewModel.runAutoAttendanceToday()
+                                                        }
+                                                    }
+                                                    .testTag("auto_attendance_toggle")
+                                            ) {
+                                                Text(
+                                                    text = if (settings.autoAttendanceEnabled) "चालू (ON) ✔" else "बंद (OFF)",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (settings.autoAttendanceEnabled) Color(0xFF16A34A) else Color(0xFF64748B),
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                        }
+
+                                        if (settings.autoAttendanceEnabled) {
+                                            Button(
+                                                onClick = { viewModel.runAutoAttendanceToday() },
+                                                shape = RoundedCornerShape(6.dp),
+                                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary),
+                                                modifier = Modifier
+                                                    .height(28.dp)
+                                                    .testTag("run_auto_attendance_now_button")
+                                            ) {
+                                                Text("आज ऑटो लगाएं", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                                            }
                                         }
                                     }
 
                                     if (settings.autoAttendanceEnabled) {
-                                        Button(
-                                            onClick = { viewModel.runAutoAttendanceToday() },
-                                            shape = RoundedCornerShape(6.dp),
-                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = activeTheme.primary),
-                                            modifier = Modifier.height(28.dp)
+                                        Text(
+                                            text = "✔ ऐप बंद हो या खुला — रोज़ ${settings.autoAttendanceTime.ifBlank { "09:00" }} बजे सक्रिय स्टाफ की हाजिरी अपने आप लग जाएगी।",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFF1E40AF)
+                                        )
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .horizontalScroll(rememberScrollState())
                                         ) {
-                                            Text("आज ऑटो लगाएं", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                                            Text("समय चुनें:", fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF334155))
+                                            listOf("08:00", "09:00", "09:30", "10:00", "10:30").forEach { timeSlot ->
+                                                val isSel = settings.autoAttendanceTime.ifBlank { "09:00" } == timeSlot
+                                                FilterChip(
+                                                    selected = isSel,
+                                                    onClick = {
+                                                        val updated = settings.copy(autoAttendanceTime = timeSlot)
+                                                        viewModel.saveShopSettings(updated)
+                                                        viewModel.showMessage("⚡ ऑटो-हाजिरी रोज़ $timeSlot पर सेट हो गई (ऐप बंद होने पर भी चलेगी)")
+                                                    },
+                                                    label = { Text(timeSlot, fontSize = 10.sp) }
+                                                )
+                                            }
                                         }
                                     }
                                 }

@@ -35,19 +35,25 @@ import com.example.data.model.StaffPayment
         com.example.data.model.ClientLicense::class,
         com.example.data.model.AppUser::class,
         com.example.data.model.RecycleBinItem::class,
-        com.example.data.model.AdminGlobalConfig::class
+        com.example.data.model.AdminGlobalConfig::class,
+        com.example.data.model.TileLocation::class,
+        com.example.data.model.OrderDeliveryLog::class,
+        com.example.data.model.OrderReturnExchangeLog::class
     ],
-    version = 16,
+    version = 19,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun shopSettingsDao(): ShopSettingsDao
     abstract fun sizePricingDao(): SizePricingDao
+    abstract fun tileLocationDao(): TileLocationDao
     abstract fun tileProductDao(): TileProductDao
     abstract fun customerDao(): CustomerDao
     abstract fun orderDao(): OrderDao
     abstract fun orderItemDao(): OrderItemDao
+    abstract fun orderDeliveryDao(): OrderDeliveryDao
+    abstract fun orderReturnExchangeDao(): OrderReturnExchangeDao
     abstract fun stockMovementDao(): StockMovementDao
     abstract fun staffDao(): StaffDao
     abstract fun clientLicenseDao(): ClientLicenseDao
@@ -141,6 +147,101 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_16_17 = object : androidx.room.migration.Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE shop_settings ADD COLUMN autoAttendanceTime TEXT NOT NULL DEFAULT '09:00'")
+                db.execSQL("ALTER TABLE shop_settings ADD COLUMN lastAutoAttendanceDate TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE shop_settings ADD COLUMN backupFolderUri TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE shop_settings ADD COLUMN backupFolderName TEXT NOT NULL DEFAULT 'TilesAndMarbles_Backups'")
+                db.execSQL("ALTER TABLE shop_settings ADD COLUMN driveWebhookUrl TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        val MIGRATION_17_18 = object : androidx.room.migration.Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. Tile Storage Locations table + location column on tile_products
+                db.execSQL("ALTER TABLE tile_products ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS tile_locations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        name TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_tile_locations_name ON tile_locations (name)")
+                val now = System.currentTimeMillis()
+                db.execSQL("INSERT OR IGNORE INTO tile_locations (name, createdAt) VALUES ('दुकान (Shop)', $now)")
+                db.execSQL("INSERT OR IGNORE INTO tile_locations (name, createdAt) VALUES ('गोदाम (Godown)', $now)")
+                db.execSQL("INSERT OR IGNORE INTO tile_locations (name, createdAt) VALUES ('वेयरहाउस (Warehouse)', $now)")
+
+                // 2. Partial / Staged Tile Delivery tracking columns & delivery logs table
+                db.execSQL("ALTER TABLE orders ADD COLUMN deliveryStatus TEXT NOT NULL DEFAULT 'FULL_DELIVERED'")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN deliveredBoxes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN deliveredPieces INTEGER NOT NULL DEFAULT 0")
+                // Mark existing historical orders' items as delivered so old bills stay consistent
+                db.execSQL("UPDATE order_items SET deliveredBoxes = fullBoxes, deliveredPieces = loosePieces")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS order_deliveries (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        orderId INTEGER NOT NULL,
+                        orderItemId INTEGER NOT NULL,
+                        tileCode TEXT NOT NULL,
+                        tileName TEXT NOT NULL,
+                        tileSize TEXT NOT NULL,
+                        piecesPerBox INTEGER NOT NULL,
+                        boxesDelivered INTEGER NOT NULL,
+                        piecesDelivered INTEGER NOT NULL DEFAULT 0,
+                        deliveredAt INTEGER NOT NULL,
+                        receiverName TEXT NOT NULL DEFAULT '',
+                        notes TEXT NOT NULL DEFAULT ''
+                    )
+                """.trimIndent())
+            }
+        }
+
+        val MIGRATION_18_19 = object : androidx.room.migration.Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. Per-order PDF display toggles
+                db.execSQL("ALTER TABLE orders ADD COLUMN showSizeTotalOnPdf INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE orders ADD COLUMN showDeliveryStatusOnPdf INTEGER NOT NULL DEFAULT 1")
+
+                // 2. Marble / Stone calculation fields on order_items
+                db.execSQL("ALTER TABLE order_items ADD COLUMN itemType TEXT NOT NULL DEFAULT 'TILE'")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN marbleLength REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN marbleWidth REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN marbleUnit TEXT NOT NULL DEFAULT 'INCH'")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN marblePieces INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN marbleTotalSqFt REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE order_items ADD COLUMN marbleRatePerSqFt REAL NOT NULL DEFAULT 0.0")
+
+                // 3. Return & Exchange history table
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS order_return_exchanges (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        orderId INTEGER NOT NULL,
+                        returnedItemId INTEGER NOT NULL DEFAULT 0,
+                        returnedTileCode TEXT NOT NULL DEFAULT '',
+                        returnedTileName TEXT NOT NULL DEFAULT '',
+                        returnedTileSize TEXT NOT NULL DEFAULT '',
+                        returnedBoxes INTEGER NOT NULL DEFAULT 0,
+                        returnedPieces INTEGER NOT NULL DEFAULT 0,
+                        returnedAmount REAL NOT NULL DEFAULT 0.0,
+                        outcomeType TEXT NOT NULL DEFAULT 'REFUND_BALANCE',
+                        replacementItemName TEXT NOT NULL DEFAULT '',
+                        replacementTileCode TEXT NOT NULL DEFAULT '',
+                        replacementTileSize TEXT NOT NULL DEFAULT '',
+                        replacementBoxes INTEGER NOT NULL DEFAULT 0,
+                        replacementPieces INTEGER NOT NULL DEFAULT 0,
+                        replacementAmount REAL NOT NULL DEFAULT 0.0,
+                        replacementDeliveryStatus TEXT NOT NULL DEFAULT 'NONE',
+                        netAmountDifference REAL NOT NULL DEFAULT 0.0,
+                        notes TEXT NOT NULL DEFAULT '',
+                        createdAt INTEGER NOT NULL
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -148,7 +249,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "mourya_tiles.db"
                 )
-                    .addMigrations(MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
+                    .addMigrations(MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
                     .fallbackToDestructiveMigration()
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
@@ -158,6 +259,9 @@ abstract class AppDatabase : RoomDatabase() {
                                 val database = getInstance(context)
                                 database.shopSettingsDao().saveSettings(ShopSettings())
                                 database.adminGlobalConfigDao().saveConfig(com.example.data.model.AdminGlobalConfig())
+                                database.tileLocationDao().insert(com.example.data.model.TileLocation(name = "दुकान (Shop)"))
+                                database.tileLocationDao().insert(com.example.data.model.TileLocation(name = "गोदाम (Godown)"))
+                                database.tileLocationDao().insert(com.example.data.model.TileLocation(name = "वेयरहाउस (Warehouse)"))
                                 database.sizePricingDao().insert(SizePricing(sizeName = "12x18", defaultPricePerBox = 340.0, defaultPiecesPerBox = 6))
                                 database.sizePricingDao().insert(SizePricing(sizeName = "2x4", defaultPricePerBox = 750.0, defaultPiecesPerBox = 2))
                                 database.sizePricingDao().insert(SizePricing(sizeName = "2x2", defaultPricePerBox = 560.0, defaultPiecesPerBox = 4))

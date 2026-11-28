@@ -79,7 +79,7 @@ fun OrderListScreen(
     val activeTheme = getAppThemeOption(settings.appTheme)
 
     var searchQuery by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableStateOf("ALL") } // "ALL", "CONFIRMED", "PENDING"
+    var selectedTab by remember { mutableStateOf("ALL") } // "ALL", "CONFIRMED", "PENDING", "DELIVERY_PENDING"
 
     val filteredOrders = orders.filter { order ->
         val matchesQuery = searchQuery.isBlank() ||
@@ -90,6 +90,7 @@ fun OrderListScreen(
         val matchesTab = when (selectedTab) {
             "CONFIRMED" -> order.status == "CONFIRMED"
             "PENDING" -> order.status == "PENDING"
+            "DELIVERY_PENDING" -> order.deliveryStatus != "FULL_DELIVERED"
             else -> true
         }
 
@@ -176,6 +177,13 @@ fun OrderListScreen(
                         selected = selectedTab == "ALL",
                         onClick = { selectedTab = "ALL" },
                         label = { Text("All (${orders.size})") }
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = selectedTab == "DELIVERY_PENDING",
+                        onClick = { selectedTab = "DELIVERY_PENDING" },
+                        label = { Text("📦 बाकी डिलीवरी (${orders.count { it.deliveryStatus != "FULL_DELIVERED" }})") }
                     )
                 }
                 item {
@@ -309,9 +317,27 @@ private fun OrderCardItem(
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                val (delivLabel, delivBg, delivFg) = when (order.deliveryStatus) {
+                    "NOT_DELIVERED" -> Triple("📦 डिलीवरी बाकी (Hold)", Color(0xFFFEE2E2), Color(0xFFDC2626))
+                    "PARTIAL_PENDING" -> Triple("🚚 आंशिक डिलीवरी / बाकी", Color(0xFFFFEDD5), Color(0xFFC2410C))
+                    else -> Triple("✅ पूरी डिलीवरी", Color(0xFFDCFCE7), Color(0xFF15803D))
+                }
+                Surface(
+                    color = delivBg,
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = delivLabel,
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = delivFg,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+
                 OutlinedButton(
                     onClick = onEditClick,
                     shape = RoundedCornerShape(8.dp),

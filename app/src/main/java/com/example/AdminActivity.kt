@@ -289,36 +289,34 @@ private fun AdminAppContent(
     suspend fun syncRegistrationsFromCloud(notifyIfNew: Boolean = false) {
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             try {
-                // 1. Fetch live incoming registration requests from ntfy queue
-                val pendingList = com.example.util.PermanentVaultHelper.fetchCloudPendingRegistrations()
+                // 1. Fetch live cloud users directory (all self-registered & active User App accounts)
+                val cloudDirList = com.example.util.PermanentVaultHelper.fetchCloudPendingRegistrations()
                 var newCount = 0
-                for (pu in pendingList) {
-                    if (!com.example.util.PermanentVaultHelper.isPhoneDeleted(pu.phone, context)) {
-                        val existing = repository.appUserDao.getUserByPhone(pu.phone)
-                        if (existing == null) {
-                            repository.appUserDao.insert(pu)
-                            newCount++
-                        } else if (existing.approvalStatus != pu.approvalStatus && existing.approvalStatus != "APPROVED") {
-                            repository.appUserDao.update(pu.copy(id = existing.id))
-                        }
+                for (pu in cloudDirList) {
+                    val norm = com.example.util.PermanentVaultHelper.normalizePhone(pu.phone)
+                    if (norm.isBlank() || com.example.util.PermanentVaultHelper.isPhoneDeleted(norm, context)) continue
+                    val existing = repository.appUserDao.getUserByPhone(norm) ?: repository.appUserDao.getUserByPhone(pu.phone)
+                    if (existing == null) {
+                        repository.appUserDao.insert(pu.copy(id = 0L, phone = norm))
+                        newCount++
                     }
                 }
 
-                // 2. Also sync with persistent users registry
-                val cloudUsers = com.example.util.PermanentVaultHelper.loadUsersRegistry(context)
-                for (cu in cloudUsers) {
-                    if (!com.example.util.PermanentVaultHelper.isPhoneDeleted(cu.phone, context)) {
-                        val existing = repository.appUserDao.getUserByPhone(cu.phone)
-                        if (existing == null) {
-                            repository.appUserDao.insert(cu)
-                            newCount++
-                        }
+                // 2. Also sync with local persistent users vault
+                val vaultUsers = com.example.util.PermanentVaultHelper.loadUsersRegistry(context)
+                for (cu in vaultUsers) {
+                    val norm = com.example.util.PermanentVaultHelper.normalizePhone(cu.phone)
+                    if (norm.isBlank() || com.example.util.PermanentVaultHelper.isPhoneDeleted(norm, context)) continue
+                    val existing = repository.appUserDao.getUserByPhone(norm) ?: repository.appUserDao.getUserByPhone(cu.phone)
+                    if (existing == null) {
+                        repository.appUserDao.insert(cu.copy(id = 0L, phone = norm))
+                        newCount++
                     }
                 }
 
                 if (newCount > 0 && notifyIfNew) {
                     kotlinx.coroutines.withContext(Dispatchers.Main) {
-                        onShowMessage("🆕 $newCount नया यूजर रजिस्ट्रेशन अनुरोध प्राप्त हुआ!")
+                        onShowMessage("🆕 $newCount नया यूजर क्लाउड से सिंक हुआ!")
                     }
                 }
             } catch (_: Exception) {}
@@ -327,15 +325,26 @@ private fun AdminAppContent(
 
     LaunchedEffect(Unit) {
         repository.ensureDefaultUserExists()
-        // Continuous real-time listener: fetches new user registrations across devices every 2.5 seconds!
+        // Sync latest cloud AdminGlobalConfig once on startup so Admin App shows live settings
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            try {
+                val cloudCfg = com.example.util.PermanentVaultHelper.fetchLiveCloudAdminConfig()
+                if (cloudCfg != null) {
+                    repository.adminGlobalConfigDao.saveConfig(cloudCfg)
+                }
+            } catch (_: Exception) {}
+        }
+        // Continuous real-time listener: fetches new user registrations & active users every 5 seconds!
         while (true) {
             syncRegistrationsFromCloud(notifyIfNew = true)
-            kotlinx.coroutines.delay(2500)
+            kotlinx.coroutines.delay(5000)
         }
     }
 
     var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Active, 2 = Suspended
+    var selectedFilter by remember { mutableIntStateOf(0) } // 0 = All, 1 = Active, 2 = Suspended, 3 = Pending, 4 = Expiring <= 7d
+    var cloudHealthStatusText by remember { mutableStateOf<String?>(null) }
+    var isTestingCloud by remember { mutableStateOf(false) }
 
     var showCreateUserDialog by remember { mutableStateOf(false) }
     var userToEdit by remember { mutableStateOf<AppUser?>(null) }
@@ -347,8 +356,19 @@ private fun AdminAppContent(
         usersList.count { it.approvalStatus == "PENDING" }
     }
 
+    val expiringSoonUsers = remember(usersList) {
+        val now = System.currentTimeMillis()
+        val sevenDaysMs = 7L * 24L * 60L * 60L * 1000L
+        usersList.filter { u ->
+            u.isActive && u.approvalStatus == "APPROVED" &&
+                    u.expiresAt != Long.MAX_VALUE && u.planDays != -1 &&
+                    u.expiresAt > now && (u.expiresAt - now) <= sevenDaysMs
+        }
+    }
+
     val filteredUsers = remember(usersList, searchQuery, selectedFilter) {
         val now = System.currentTimeMillis()
+        val sevenDaysMs = 7L * 24L * 60L * 60L * 1000L
         usersList.filter { u ->
             val matchesQuery = searchQuery.isBlank() ||
                     u.name.contains(searchQuery, ignoreCase = true) ||
@@ -356,10 +376,14 @@ private fun AdminAppContent(
                     u.phone.contains(searchQuery, ignoreCase = true)
 
             val isExpired = u.expiresAt in 1..now
+            val isExpiringSoon = u.isActive && u.approvalStatus == "APPROVED" &&
+                    u.expiresAt != Long.MAX_VALUE && u.planDays != -1 &&
+                    u.expiresAt > now && (u.expiresAt - now) <= sevenDaysMs
             val matchesFilter = when (selectedFilter) {
                 1 -> u.isActive && !isExpired && u.approvalStatus == "APPROVED"
                 2 -> !u.isActive || isExpired || u.approvalStatus == "REJECTED"
                 3 -> u.approvalStatus == "PENDING"
+                4 -> isExpiringSoon
                 else -> true
             }
             matchesQuery && matchesFilter
@@ -493,20 +517,87 @@ private fun AdminAppContent(
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        Button(
-                            onClick = { showCreateUserDialog = true },
-                            colors = ButtonDefaults.buttonColors(containerColor = accentColor),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = null, tint = accentTextColor)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "+ नया यूजर / ग्राहक जोड़ें (Create ID & Password)",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = accentTextColor
-                            )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Button(
+                                onClick = { showCreateUserDialog = true },
+                                colors = ButtonDefaults.buttonColors(containerColor = accentColor),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1.45f)
+                            ) {
+                                Icon(imageVector = Icons.Default.Add, contentDescription = null, tint = accentTextColor, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "+ नया यूजर जोड़ें",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.5.sp,
+                                    color = accentTextColor
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    if (isTestingCloud) return@OutlinedButton
+                                    isTestingCloud = true
+                                    cloudHealthStatusText = "⏳ लाइव क्लाउड सर्वर जांचा जा रहा है..."
+                                    scope.launch(Dispatchers.IO) {
+                                        fun pingHost(urlStr: String): Pair<Boolean, Long> {
+                                            val start = System.currentTimeMillis()
+                                            return try {
+                                                val conn = (java.net.URL(urlStr).openConnection() as java.net.HttpURLConnection).apply {
+                                                    requestMethod = "GET"
+                                                    connectTimeout = 5000
+                                                    readTimeout = 5000
+                                                }
+                                                val code = conn.responseCode
+                                                conn.disconnect()
+                                                Pair(code in 200..499, System.currentTimeMillis() - start)
+                                            } catch (_: Exception) {
+                                                Pair(false, System.currentTimeMillis() - start)
+                                            }
+                                        }
+                                        val (ok1, ms1) = pingHost("https://textdb.dev/api/data/mourya_health_ping")
+                                        val (ok2, ms2) = pingHost("https://textdb.online/mourya_health_ping")
+                                        val summary = buildString {
+                                            append(if (ok1 || ok2) "✅ क्लाउड रिमोट कंट्रोल लाइव है | " else "❌ क्लाउड संपर्क विफल (इंटरनेट जांचें) | ")
+                                            append("Server1: ${if (ok1) "✔ ${ms1}ms" else "✖"} • ")
+                                            append("Server2: ${if (ok2) "✔ ${ms2}ms" else "✖"}")
+                                        }
+                                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                            isTestingCloud = false
+                                            cloudHealthStatusText = summary
+                                            onShowMessage(summary)
+                                        }
+                                    }
+                                },
+                                border = BorderStroke(1.dp, accentColor),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = if (isTestingCloud) "जांच..." else "☁️ क्लाउड टेस्ट",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.5.sp,
+                                    color = PureWhite
+                                )
+                            }
+                        }
+
+                        if (!cloudHealthStatusText.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (cloudHealthStatusText!!.startsWith("✅")) Color(0xFF064E3B) else Color(0xFF7F1D1D),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = cloudHealthStatusText!!,
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = PureWhite,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -553,10 +644,58 @@ private fun AdminAppContent(
                                 label = { Text("🟢 सक्रिय ($activeCount)") }
                             )
                             FilterChip(
+                                selected = selectedFilter == 4,
+                                onClick = { selectedFilter = 4 },
+                                label = { Text("⏰ 7 दिन में समाप्त (${expiringSoonUsers.size})") }
+                            )
+                            FilterChip(
                                 selected = selectedFilter == 2,
                                 onClick = { selectedFilter = 2 },
                                 label = { Text("🔴 ब्लॉक / समाप्त") }
                             )
+                        }
+                    }
+                }
+            }
+
+            // Expiring Soon Alert Banner (<= 7 Days Remaining) with 1-Tap +30 Days Renew
+            if (expiringSoonUsers.isNotEmpty() && selectedFilter != 4) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF7ED)),
+                        border = BorderStroke(1.dp, Color(0xFFFDBA74)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedFilter = 4 }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(imageVector = Icons.Default.AccessTime, contentDescription = null, tint = Color(0xFFEA580C), modifier = Modifier.size(22.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "⏰ ${expiringSoonUsers.size} यूजर का प्लान 7 दिन में समाप्त हो रहा है!",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = Color(0xFF9A3412)
+                                )
+                                Text(
+                                    text = "रिन्यूअल रिमाइंडर भेजने या +30 दिन बढ़ाने के लिए टैप करें।",
+                                    fontSize = 10.5.sp,
+                                    color = Color(0xFFC2410C)
+                                )
+                            }
+                            Button(
+                                onClick = { selectedFilter = 4 },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEA580C)),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+                            ) {
+                                Text("देखें", fontSize = 11.sp, color = PureWhite, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -638,14 +777,14 @@ private fun AdminAppContent(
                         activeThemeColor = activeThemeColor,
                         onApprove = {
                             scope.launch(Dispatchers.IO) {
-                                repository.approveUser(user.id, context)
-                                onShowMessage("✅ ${user.name} का खाता स्वीकृत (Approved) हो गया!")
+                                val ok = repository.approveUser(user.id, context).getOrDefault(false)
+                                onShowMessage(if (ok) "✅ ${user.name} स्वीकृत (Approved) व क्लाउड सिंक सफल!" else "✅ ${user.name} लोकल स्वीकृत (इंटरनेट जांचें)")
                             }
                         },
                         onReject = {
                             scope.launch(Dispatchers.IO) {
-                                repository.rejectUser(user.id, context)
-                                onShowMessage("❌ खाता अस्वीकार कर दिया गया")
+                                val ok = repository.rejectUser(user.id, context).getOrDefault(false)
+                                onShowMessage(if (ok) "❌ खाता अस्वीकार व क्लाउड से ब्लॉक हुआ!" else "❌ खाता लोकल अस्वीकार (इंटरनेट जांचें)")
                             }
                         },
                         onCopyCredentials = {
@@ -659,8 +798,15 @@ private fun AdminAppContent(
                         },
                         onToggleStatus = {
                             scope.launch(Dispatchers.IO) {
-                                repository.updateUserStatus(user.id, !user.isActive, context)
-                                onShowMessage(if (!user.isActive) "यूजर सक्रिय किया गया" else "यूजर ब्लॉक किया गया (User App से तुरंत लॉगआउट होगा)")
+                                val targetActive = !user.isActive
+                                val ok = repository.updateUserStatus(user.id, targetActive, context)
+                                val msg = when {
+                                    targetActive && ok -> "✅ यूजर अनब्लॉक (Active) हुआ — User App तुरंत चालू होगा!"
+                                    !targetActive && ok -> "🚫 यूजर ब्लॉक हुआ — User App 3 सेकंड में ऑटो-लॉगआउट होगा!"
+                                    targetActive -> "⚠️ लोकल अनब्लॉक हुआ, पर क्लाउड सिंक विफल (इंटरनेट जांचें)"
+                                    else -> "⚠️ लोकल ब्लॉक हुआ, पर क्लाउड सिंक विफल (इंटरनेट जांचें)"
+                                }
+                                onShowMessage(msg)
                             }
                         },
                         onManageValidity = {
@@ -691,10 +837,39 @@ private fun AdminAppContent(
                                 onShowMessage("WhatsApp नहीं खुला")
                             }
                         },
+                        onQuickRenew30Days = {
+                            scope.launch(Dispatchers.IO) {
+                                val baseMs = maxOf(System.currentTimeMillis(), user.expiresAt)
+                                val newExp = if (user.expiresAt == Long.MAX_VALUE) Long.MAX_VALUE else baseMs + (30L * 86400000L)
+                                val updated = user.copy(expiresAt = newExp, isActive = true, approvalStatus = "APPROVED")
+                                val ok = repository.updateUser(updated, context)
+                                onShowMessage(if (ok) "✅ ${user.name} को +30 दिन रिन्यू व क्लाउड सिंक सफल!" else "✅ +30 दिन लोकल रिन्यू (इंटरनेट जांचें)")
+                            }
+                        },
+                        onSendRenewalReminder = {
+                            val cleanPhone = user.phone.replace("[^0-9]".toRegex(), "")
+                            val expiryText = if (user.expiresAt == Long.MAX_VALUE) "Lifetime" else SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(user.expiresAt))
+                            val msg = """
+                                नमस्ते ${user.name} जी! 🙏
+                                आपकी दुकान ${user.shopName} के Tiles & Marbles ERP ऐप की वैधता ($expiryText) जल्द समाप्त हो रही है / समाप्त हो गई है।
+                                
+                                बिना किसी रुकावट के बिलिंग, स्टॉक व बैकअप जारी रखने के लिए कृपया अपना सब्सक्रिप्शन रिन्यू करवाएं। धन्यवाद!
+                            """.trimIndent()
+                            try {
+                                val url = if (cleanPhone.length >= 10) {
+                                    "https://api.whatsapp.com/send?phone=$cleanPhone&text=${URLEncoder.encode(msg, "UTF-8")}"
+                                } else {
+                                    "https://api.whatsapp.com/send?text=${URLEncoder.encode(msg, "UTF-8")}"
+                                }
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            } catch (_: Exception) {
+                                onShowMessage("WhatsApp नहीं खुला")
+                            }
+                        },
                         onDelete = {
                             scope.launch(Dispatchers.IO) {
-                                repository.deleteUser(user.id, context)
-                                onShowMessage("यूजर हटाया गया (User App से तुरंत ऑटो-लॉगआउट होगा)")
+                                val ok = repository.deleteUser(user.id, context)
+                                onShowMessage(if (ok) "🗑️ यूजर हटाया गया — User App 3 सेकंड में लॉगआउट होगा!" else "🗑️ लोकल हटाया गया (क्लाउड सिंक हेतु इंटरनेट जांचें)")
                             }
                         }
                     )
@@ -745,11 +920,12 @@ private fun AdminAppContent(
                         expiresAt = newExpiresAt,
                         planDays = newPlanDays,
                         planName = newPlanName,
-                        isActive = true
+                        isActive = true,
+                        approvalStatus = "APPROVED"
                     )
-                    repository.updateUser(updated, context)
+                    val ok = repository.updateUser(updated, context)
                     userForValidityDialog = null
-                    onShowMessage("✅ ${targetUser.name} की वैधता सफलतापूर्वक अपडेट हो गई!")
+                    onShowMessage(if (ok) "✅ ${targetUser.name} की वैधता अपडेट व क्लाउड सिंक सफल!" else "✅ वैधता लोकल अपडेट हुई (इंटरनेट जांचें)")
                 }
             }
         )
@@ -917,17 +1093,8 @@ private fun AdminAppContent(
                                 password = cleanPass,
                                 notes = editNotes.trim()
                             )
-                            repository.updateUser(updated, context)
-                            // Sync shop settings and session so User App reflects the changes immediately
-                            val currentSettings = repository.getCurrentShopSettings()
-                            val updatedSettings = currentSettings.copy(
-                                shopName = editShop.trim(),
-                                ownerName = editName.trim(),
-                                ownerPhone = cleanPhone
-                            )
-                            repository.saveSettings(updatedSettings)
-                            com.example.data.security.UserSessionManager.saveSession(context, updated)
-                            onShowMessage("यूजर विवरण व ID/Password सफलतापूर्वक अपडेट हो गया!")
+                            val ok = repository.updateUser(updated, context, previousPhone = user.phone)
+                            onShowMessage(if (ok) "✅ यूजर विवरण व ID/Password अपडेट व क्लाउड सिंक सफल!" else "✅ लोकल अपडेट हुआ (क्लाउड हेतु इंटरनेट जांचें)")
                         }
                         userToEdit = null
                     },
@@ -1596,6 +1763,29 @@ private fun AdminAppContent(
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text("📤 पूरा मास्टर डेटा बैकअप एक्सपोर्ट करें")
                                 }
+
+                                HorizontalDivider()
+
+                                // Bulk +30 Days Bonus to All Active Users
+                                Button(
+                                    onClick = {
+                                        scope.launch(Dispatchers.IO) {
+                                            val now = System.currentTimeMillis()
+                                            var boosted = 0
+                                            usersList.filter { it.isActive && it.approvalStatus == "APPROVED" && it.expiresAt != Long.MAX_VALUE && it.planDays != -1 }.forEach { u ->
+                                                val baseMs = maxOf(now, u.expiresAt)
+                                                repository.updateUser(u.copy(expiresAt = baseMs + (30L * 86400000L)), context)
+                                                boosted++
+                                            }
+                                            onShowMessage("🎁 $boosted सक्रिय यूजर्स को +30 दिन बोनस वैधता दी गई!")
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("🎁 सभी सक्रिय यूजर्स को +30 दिन बोनस दें", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                                }
                             }
                         }
                     }
@@ -1659,10 +1849,9 @@ private fun AdminAppContent(
                         )
 
                         scope.launch(Dispatchers.IO) {
-                            repository.saveAdminGlobalConfig(context, updatedConfig)
+                            val ok = repository.saveAdminGlobalConfig(context, updatedConfig)
+                            onShowMessage(if (ok) "✅ सभी एडमिन नियंत्रण लाइव क्लाउड पर सिंक हुए (User App 5 सेकंड में अपडेट होगा)!" else "⚠️ सेटिंग्स लोकल सेव हुईं, पर क्लाउड सिंक विफल (इंटरनेट जांचें)")
                         }
-
-                        onShowMessage("✅ एडमिन सेटिंग्स, टेलीग्राम व अपडेट नियंत्रण सुरक्षित हुए!")
                         showSettingsDialog = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = activeThemeColor),
@@ -1691,6 +1880,8 @@ private fun UserAccountCard(
     onToggleStatus: () -> Unit,
     onManageValidity: () -> Unit,
     onShareWhatsApp: () -> Unit,
+    onQuickRenew30Days: () -> Unit,
+    onSendRenewalReminder: () -> Unit,
     onDelete: () -> Unit
 ) {
     val now = System.currentTimeMillis()
@@ -1872,7 +2063,30 @@ private fun UserAccountCard(
                 )
             }
 
-            // Dedicated Stepper & Days Management Button (+ / -)
+            // Dedicated Stepper & Days Management Button (+ / -) + Quick Renew / Reminder for Expiring Users
+            val isExpiringOrExpired = !isLifetime && !isPending && (isExpired || remainingDays <= 7)
+            if (isExpiringOrExpired) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = onQuickRenew30Days,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("⚡ +30 दिन रिन्यू", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = PureWhite)
+                    }
+                    OutlinedButton(
+                        onClick = onSendRenewalReminder,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1.1f)
+                    ) {
+                        Text("🔔 रिन्यूअल रिमाइंडर", fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = Color(0xFFEA580C))
+                    }
+                }
+            }
+
             Button(
                 onClick = onManageValidity,
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E3A8A)),

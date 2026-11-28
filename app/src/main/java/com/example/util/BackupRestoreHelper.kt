@@ -224,11 +224,16 @@ object BackupRestoreHelper {
             put("telegramFormat", settings.telegramFormat)
             put("telegramCustomTitle", settings.telegramCustomTitle)
             put("autoAttendanceEnabled", settings.autoAttendanceEnabled)
+            put("autoAttendanceTime", settings.autoAttendanceTime)
+            put("lastAutoAttendanceDate", settings.lastAutoAttendanceDate)
             put("autoBackupEnabled", settings.autoBackupEnabled)
             put("backupTargetEmail", settings.backupTargetEmail)
             put("backupScheduledTime", settings.backupScheduledTime)
             put("backupFromDateString", settings.backupFromDateString)
             put("lastAutoBackupDate", settings.lastAutoBackupDate)
+            put("backupFolderUri", settings.backupFolderUri)
+            put("backupFolderName", settings.backupFolderName)
+            put("driveWebhookUrl", settings.driveWebhookUrl)
             put("pdfSizeDisplayConfigJson", settings.pdfSizeDisplayConfigJson)
         }
         root.put("settings", settingsObj)
@@ -245,6 +250,18 @@ object BackupRestoreHelper {
             pricingArr.put(po)
         }
         root.put("sizePricing", pricingArr)
+
+        // 2.5. Tile Storage Locations
+        val locations = database.tileLocationDao().getAllLocationsSync()
+        val locArr = JSONArray()
+        for (loc in locations) {
+            locArr.put(JSONObject().apply {
+                put("id", loc.id)
+                put("name", loc.name)
+                put("createdAt", loc.createdAt)
+            })
+        }
+        root.put("tileLocations", locArr)
 
         // 3. Tile Products
         val products = database.tileProductDao().getAllProductsSync()
@@ -264,6 +281,7 @@ object BackupRestoreHelper {
                 put("defaultSellingPrice", prod.defaultSellingPrice)
                 put("purchaseCost", prod.purchaseCost)
                 put("createdAt", prod.createdAt)
+                put("location", prod.location)
             }
             productArr.put(po)
         }
@@ -299,6 +317,8 @@ object BackupRestoreHelper {
                 put("customerAddress", o.customerAddress)
                 put("status", o.status)
                 put("showPriceOnPdf", o.showPriceOnPdf)
+                put("showSizeTotalOnPdf", o.showSizeTotalOnPdf)
+                put("showDeliveryStatusOnPdf", o.showDeliveryStatusOnPdf)
                 put("subtotal", o.subtotal)
                 put("discount", o.discount)
                 put("grandTotal", o.grandTotal)
@@ -308,6 +328,7 @@ object BackupRestoreHelper {
                 put("notes", o.notes)
                 put("createdAt", o.createdAt)
                 put("confirmedAt", o.confirmedAt ?: -1L)
+                put("deliveryStatus", o.deliveryStatus)
             }
             orderArr.put(oo)
         }
@@ -332,10 +353,69 @@ object BackupRestoreHelper {
                 put("loosePieces", item.loosePieces)
                 put("pricePerBox", item.pricePerBox)
                 put("lineTotal", item.lineTotal)
+                put("deliveredBoxes", item.deliveredBoxes)
+                put("deliveredPieces", item.deliveredPieces)
+                put("itemType", item.itemType)
+                put("marbleLength", item.marbleLength)
+                put("marbleWidth", item.marbleWidth)
+                put("marbleUnit", item.marbleUnit)
+                put("marblePieces", item.marblePieces)
+                put("marbleTotalSqFt", item.marbleTotalSqFt)
+                put("marbleRatePerSqFt", item.marbleRatePerSqFt)
             }
             itemArr.put(io)
         }
         root.put("orderItems", itemArr)
+
+        // 6.5. Order Delivery Logs
+        val deliveries = database.orderDeliveryDao().getAllDeliveriesSync()
+        val delArr = JSONArray()
+        for (d in deliveries) {
+            delArr.put(JSONObject().apply {
+                put("id", d.id)
+                put("orderId", d.orderId)
+                put("orderItemId", d.orderItemId)
+                put("tileCode", d.tileCode)
+                put("tileName", d.tileName)
+                put("tileSize", d.tileSize)
+                put("piecesPerBox", d.piecesPerBox)
+                put("boxesDelivered", d.boxesDelivered)
+                put("piecesDelivered", d.piecesDelivered)
+                put("deliveredAt", d.deliveredAt)
+                put("receiverName", d.receiverName)
+                put("notes", d.notes)
+            })
+        }
+        root.put("orderDeliveries", delArr)
+
+        // 6.6. Order Return / Exchange Logs
+        val returnExchanges = database.orderReturnExchangeDao().getAllSync()
+        val retArr = JSONArray()
+        for (r in returnExchanges) {
+            retArr.put(JSONObject().apply {
+                put("id", r.id)
+                put("orderId", r.orderId)
+                put("returnedItemId", r.returnedItemId)
+                put("returnedTileCode", r.returnedTileCode)
+                put("returnedTileName", r.returnedTileName)
+                put("returnedTileSize", r.returnedTileSize)
+                put("returnedBoxes", r.returnedBoxes)
+                put("returnedPieces", r.returnedPieces)
+                put("returnedAmount", r.returnedAmount)
+                put("outcomeType", r.outcomeType)
+                put("replacementItemName", r.replacementItemName)
+                put("replacementTileCode", r.replacementTileCode)
+                put("replacementTileSize", r.replacementTileSize)
+                put("replacementBoxes", r.replacementBoxes)
+                put("replacementPieces", r.replacementPieces)
+                put("replacementAmount", r.replacementAmount)
+                put("replacementDeliveryStatus", r.replacementDeliveryStatus)
+                put("netAmountDifference", r.netAmountDifference)
+                put("notes", r.notes)
+                put("createdAt", r.createdAt)
+            })
+        }
+        root.put("orderReturnExchanges", retArr)
 
         // 7. Staff Members
         val staffList = database.staffDao().getAllStaff().let {
@@ -554,11 +634,16 @@ object BackupRestoreHelper {
             put("telegramFormat", settings.telegramFormat)
             put("telegramCustomTitle", settings.telegramCustomTitle)
             put("autoAttendanceEnabled", settings.autoAttendanceEnabled)
+            put("autoAttendanceTime", settings.autoAttendanceTime)
+            put("lastAutoAttendanceDate", settings.lastAutoAttendanceDate)
             put("autoBackupEnabled", settings.autoBackupEnabled)
             put("backupTargetEmail", settings.backupTargetEmail)
             put("backupScheduledTime", settings.backupScheduledTime)
             put("backupFromDateString", settings.backupFromDateString)
             put("lastAutoBackupDate", settings.lastAutoBackupDate)
+            put("backupFolderUri", settings.backupFolderUri)
+            put("backupFolderName", settings.backupFolderName)
+            put("driveWebhookUrl", settings.driveWebhookUrl)
             put("pdfSizeDisplayConfigJson", settings.pdfSizeDisplayConfigJson)
         }
         root.put("settings", settingsObj)
@@ -574,6 +659,18 @@ object BackupRestoreHelper {
             })
         }
         root.put("sizePricing", pricingArr)
+
+        // Tile Locations
+        val locations = database.tileLocationDao().getAllLocationsSync()
+        val locArr = JSONArray()
+        for (loc in locations) {
+            locArr.put(JSONObject().apply {
+                put("id", loc.id)
+                put("name", loc.name)
+                put("createdAt", loc.createdAt)
+            })
+        }
+        root.put("tileLocations", locArr)
 
         // Products
         val products = database.tileProductDao().getAllProductsSync()
@@ -593,6 +690,7 @@ object BackupRestoreHelper {
                 put("defaultSellingPrice", prod.defaultSellingPrice)
                 put("purchaseCost", prod.purchaseCost)
                 put("createdAt", prod.createdAt)
+                put("location", prod.location)
             })
         }
         root.put("products", productArr)
@@ -627,6 +725,8 @@ object BackupRestoreHelper {
                 put("customerAddress", o.customerAddress)
                 put("status", o.status)
                 put("showPriceOnPdf", o.showPriceOnPdf)
+                put("showSizeTotalOnPdf", o.showSizeTotalOnPdf)
+                put("showDeliveryStatusOnPdf", o.showDeliveryStatusOnPdf)
                 put("subtotal", o.subtotal)
                 put("discount", o.discount)
                 put("grandTotal", o.grandTotal)
@@ -636,6 +736,7 @@ object BackupRestoreHelper {
                 put("notes", o.notes)
                 put("createdAt", o.createdAt)
                 put("confirmedAt", o.confirmedAt ?: -1L)
+                put("deliveryStatus", o.deliveryStatus)
             })
         }
         root.put("orders", orderArr)
@@ -660,10 +761,73 @@ object BackupRestoreHelper {
                     put("loosePieces", item.loosePieces)
                     put("pricePerBox", item.pricePerBox)
                     put("lineTotal", item.lineTotal)
+                    put("deliveredBoxes", item.deliveredBoxes)
+                    put("deliveredPieces", item.deliveredPieces)
+                    put("itemType", item.itemType)
+                    put("marbleLength", item.marbleLength)
+                    put("marbleWidth", item.marbleWidth)
+                    put("marbleUnit", item.marbleUnit)
+                    put("marblePieces", item.marblePieces)
+                    put("marbleTotalSqFt", item.marbleTotalSqFt)
+                    put("marbleRatePerSqFt", item.marbleRatePerSqFt)
                 })
             }
         }
         root.put("orderItems", itemArr)
+
+        // Order Delivery Logs for included orders
+        val allDeliveries = database.orderDeliveryDao().getAllDeliveriesSync()
+        val delArr = JSONArray()
+        for (d in allDeliveries) {
+            if (orderIds.isEmpty() || orderIds.contains(d.orderId)) {
+                delArr.put(JSONObject().apply {
+                    put("id", d.id)
+                    put("orderId", d.orderId)
+                    put("orderItemId", d.orderItemId)
+                    put("tileCode", d.tileCode)
+                    put("tileName", d.tileName)
+                    put("tileSize", d.tileSize)
+                    put("piecesPerBox", d.piecesPerBox)
+                    put("boxesDelivered", d.boxesDelivered)
+                    put("piecesDelivered", d.piecesDelivered)
+                    put("deliveredAt", d.deliveredAt)
+                    put("receiverName", d.receiverName)
+                    put("notes", d.notes)
+                })
+            }
+        }
+        root.put("orderDeliveries", delArr)
+
+        // Order Return / Exchange Logs for included orders
+        val allRetEx = database.orderReturnExchangeDao().getAllSync()
+        val retArr = JSONArray()
+        for (r in allRetEx) {
+            if (orderIds.isEmpty() || orderIds.contains(r.orderId)) {
+                retArr.put(JSONObject().apply {
+                    put("id", r.id)
+                    put("orderId", r.orderId)
+                    put("returnedItemId", r.returnedItemId)
+                    put("returnedTileCode", r.returnedTileCode)
+                    put("returnedTileName", r.returnedTileName)
+                    put("returnedTileSize", r.returnedTileSize)
+                    put("returnedBoxes", r.returnedBoxes)
+                    put("returnedPieces", r.returnedPieces)
+                    put("returnedAmount", r.returnedAmount)
+                    put("outcomeType", r.outcomeType)
+                    put("replacementItemName", r.replacementItemName)
+                    put("replacementTileCode", r.replacementTileCode)
+                    put("replacementTileSize", r.replacementTileSize)
+                    put("replacementBoxes", r.replacementBoxes)
+                    put("replacementPieces", r.replacementPieces)
+                    put("replacementAmount", r.replacementAmount)
+                    put("replacementDeliveryStatus", r.replacementDeliveryStatus)
+                    put("netAmountDifference", r.netAmountDifference)
+                    put("notes", r.notes)
+                    put("createdAt", r.createdAt)
+                })
+            }
+        }
+        root.put("orderReturnExchanges", retArr)
 
         // Staff
         val allStaffList = database.staffDao().getAllStaffSync()
@@ -870,11 +1034,16 @@ object BackupRestoreHelper {
                         telegramFormat = s.optString("telegramFormat", existing.telegramFormat),
                         telegramCustomTitle = s.optString("telegramCustomTitle", existing.telegramCustomTitle),
                         autoAttendanceEnabled = s.optBoolean("autoAttendanceEnabled", existing.autoAttendanceEnabled),
+                        autoAttendanceTime = s.optString("autoAttendanceTime", existing.autoAttendanceTime).ifBlank { "09:00" },
+                        lastAutoAttendanceDate = s.optString("lastAutoAttendanceDate", existing.lastAutoAttendanceDate),
                         autoBackupEnabled = s.optBoolean("autoBackupEnabled", existing.autoBackupEnabled),
                         backupTargetEmail = s.optString("backupTargetEmail", existing.backupTargetEmail),
                         backupScheduledTime = s.optString("backupScheduledTime", existing.backupScheduledTime),
                         backupFromDateString = s.optString("backupFromDateString", existing.backupFromDateString),
                         lastAutoBackupDate = s.optString("lastAutoBackupDate", existing.lastAutoBackupDate),
+                        backupFolderUri = s.optString("backupFolderUri", existing.backupFolderUri),
+                        backupFolderName = s.optString("backupFolderName", existing.backupFolderName).ifBlank { "TilesAndMarbles_Backups" },
+                        driveWebhookUrl = s.optString("driveWebhookUrl", existing.driveWebhookUrl),
                         pdfSizeDisplayConfigJson = s.optString("pdfSizeDisplayConfigJson", existing.pdfSizeDisplayConfigJson)
                     )
                     database.shopSettingsDao().saveSettings(settings)
@@ -893,6 +1062,23 @@ object BackupRestoreHelper {
                             database.sizePricingDao().update(existing.copy(defaultPricePerBox = price, defaultPiecesPerBox = pcs))
                         } else {
                             database.sizePricingDao().insert(SizePricing(sizeName = sizeName, defaultPricePerBox = price, defaultPiecesPerBox = pcs))
+                        }
+                    }
+                }
+
+                // Restore tile storage locations
+                if (root.has("tileLocations")) {
+                    val arr = root.getJSONArray("tileLocations")
+                    for (i in 0 until arr.length()) {
+                        val lo = arr.getJSONObject(i)
+                        val locName = lo.optString("name", "").trim()
+                        if (locName.isNotBlank() && database.tileLocationDao().getByName(locName) == null) {
+                            database.tileLocationDao().insert(
+                                com.example.data.model.TileLocation(
+                                    name = locName,
+                                    createdAt = lo.optLong("createdAt", System.currentTimeMillis())
+                                )
+                            )
                         }
                     }
                 }
@@ -930,6 +1116,11 @@ object BackupRestoreHelper {
                             }
                         }
 
+                        val restoredLocation = po.optString("location", existing?.location ?: "").trim()
+                        if (restoredLocation.isNotBlank() && database.tileLocationDao().getByName(restoredLocation) == null) {
+                            database.tileLocationDao().insert(com.example.data.model.TileLocation(name = restoredLocation))
+                        }
+
                         val prod = TileProduct(
                             id = po.optLong("id", 0),
                             code = code,
@@ -941,7 +1132,8 @@ object BackupRestoreHelper {
                             stockPieces = po.optInt("stockPieces", 0),
                             defaultSellingPrice = po.optDouble("defaultSellingPrice", 0.0),
                             purchaseCost = po.optDouble("purchaseCost", 0.0),
-                            createdAt = po.optLong("createdAt", System.currentTimeMillis())
+                            createdAt = po.optLong("createdAt", System.currentTimeMillis()),
+                            location = restoredLocation
                         )
                         if (existing != null) {
                             database.tileProductDao().update(prod.copy(id = existing.id))
@@ -985,6 +1177,8 @@ object BackupRestoreHelper {
                             customerAddress = oo.optString("customerAddress", ""),
                             status = oo.optString("status", "PENDING"),
                             showPriceOnPdf = oo.optBoolean("showPriceOnPdf", true),
+                            showSizeTotalOnPdf = oo.optBoolean("showSizeTotalOnPdf", true),
+                            showDeliveryStatusOnPdf = oo.optBoolean("showDeliveryStatusOnPdf", true),
                             subtotal = oo.optDouble("subtotal", 0.0),
                             discount = oo.optDouble("discount", 0.0),
                             grandTotal = oo.optDouble("grandTotal", 0.0),
@@ -993,7 +1187,8 @@ object BackupRestoreHelper {
                             paymentHistoryJson = oo.optString("paymentHistoryJson", ""),
                             notes = oo.optString("notes", ""),
                             createdAt = oo.optLong("createdAt", System.currentTimeMillis()),
-                            confirmedAt = if (confAt > 0) confAt else null
+                            confirmedAt = if (confAt > 0) confAt else null,
+                            deliveryStatus = oo.optString("deliveryStatus", "FULL_DELIVERED")
                         )
                         database.orderDao().insert(order)
                     }
@@ -1014,6 +1209,9 @@ object BackupRestoreHelper {
                             restoredPhotoByCode.containsKey(itemCode) -> restoredPhotoByCode[itemCode]
                             else -> rawItemPhoto
                         }
+                        val fb = io.getInt("fullBoxes")
+                        val lp = io.optInt("loosePieces", 0)
+                        val hasDel = io.has("deliveredBoxes")
                         items.add(
                             OrderItemEntity(
                                 id = io.optLong("id", 0),
@@ -1024,15 +1222,86 @@ object BackupRestoreHelper {
                                 tileSize = io.getString("tileSize"),
                                 piecesPerBox = io.getInt("piecesPerBox"),
                                 tilePhotoUri = resolvedItemPhoto,
-                                fullBoxes = io.getInt("fullBoxes"),
-                                loosePieces = io.optInt("loosePieces", 0),
+                                fullBoxes = fb,
+                                loosePieces = lp,
                                 pricePerBox = io.getDouble("pricePerBox"),
-                                lineTotal = io.getDouble("lineTotal")
+                                lineTotal = io.getDouble("lineTotal"),
+                                deliveredBoxes = if (hasDel) io.optInt("deliveredBoxes", 0) else fb,
+                                deliveredPieces = if (hasDel) io.optInt("deliveredPieces", 0) else lp,
+                                itemType = io.optString("itemType", "TILE"),
+                                marbleLength = io.optDouble("marbleLength", 0.0),
+                                marbleWidth = io.optDouble("marbleWidth", 0.0),
+                                marbleUnit = io.optString("marbleUnit", "INCH"),
+                                marblePieces = io.optInt("marblePieces", 0),
+                                marbleTotalSqFt = io.optDouble("marbleTotalSqFt", 0.0),
+                                marbleRatePerSqFt = io.optDouble("marbleRatePerSqFt", 0.0)
                             )
                         )
                     }
                     if (items.isNotEmpty()) {
                         database.orderItemDao().insertAll(items)
+                    }
+                }
+
+                if (root.has("orderDeliveries")) {
+                    val arr = root.getJSONArray("orderDeliveries")
+                    val logs = mutableListOf<com.example.data.model.OrderDeliveryLog>()
+                    for (i in 0 until arr.length()) {
+                        val d = arr.getJSONObject(i)
+                        logs.add(
+                            com.example.data.model.OrderDeliveryLog(
+                                id = d.optLong("id", 0),
+                                orderId = d.getLong("orderId"),
+                                orderItemId = d.optLong("orderItemId", 0),
+                                tileCode = d.optString("tileCode", ""),
+                                tileName = d.optString("tileName", ""),
+                                tileSize = d.optString("tileSize", ""),
+                                piecesPerBox = d.optInt("piecesPerBox", 1),
+                                boxesDelivered = d.optInt("boxesDelivered", 0),
+                                piecesDelivered = d.optInt("piecesDelivered", 0),
+                                deliveredAt = d.optLong("deliveredAt", System.currentTimeMillis()),
+                                receiverName = d.optString("receiverName", ""),
+                                notes = d.optString("notes", "")
+                            )
+                        )
+                    }
+                    if (logs.isNotEmpty()) {
+                        database.orderDeliveryDao().insertAll(logs)
+                    }
+                }
+
+                if (root.has("orderReturnExchanges")) {
+                    val arr = root.getJSONArray("orderReturnExchanges")
+                    val retLogs = mutableListOf<com.example.data.model.OrderReturnExchangeLog>()
+                    for (i in 0 until arr.length()) {
+                        val r = arr.getJSONObject(i)
+                        retLogs.add(
+                            com.example.data.model.OrderReturnExchangeLog(
+                                id = r.optLong("id", 0),
+                                orderId = r.getLong("orderId"),
+                                returnedItemId = r.optLong("returnedItemId", 0),
+                                returnedTileCode = r.optString("returnedTileCode", ""),
+                                returnedTileName = r.optString("returnedTileName", ""),
+                                returnedTileSize = r.optString("returnedTileSize", ""),
+                                returnedBoxes = r.optInt("returnedBoxes", 0),
+                                returnedPieces = r.optInt("returnedPieces", 0),
+                                returnedAmount = r.optDouble("returnedAmount", 0.0),
+                                outcomeType = r.optString("outcomeType", "REFUND_BALANCE"),
+                                replacementItemName = r.optString("replacementItemName", ""),
+                                replacementTileCode = r.optString("replacementTileCode", ""),
+                                replacementTileSize = r.optString("replacementTileSize", ""),
+                                replacementBoxes = r.optInt("replacementBoxes", 0),
+                                replacementPieces = r.optInt("replacementPieces", 0),
+                                replacementAmount = r.optDouble("replacementAmount", 0.0),
+                                replacementDeliveryStatus = r.optString("replacementDeliveryStatus", "NONE"),
+                                netAmountDifference = r.optDouble("netAmountDifference", 0.0),
+                                notes = r.optString("notes", ""),
+                                createdAt = r.optLong("createdAt", System.currentTimeMillis())
+                            )
+                        )
+                    }
+                    if (retLogs.isNotEmpty()) {
+                        database.orderReturnExchangeDao().insertAll(retLogs)
                     }
                 }
 
